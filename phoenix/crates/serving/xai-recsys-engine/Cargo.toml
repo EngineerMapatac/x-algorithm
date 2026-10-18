@@ -1,0 +1,80 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 X.AI Corp.
+[package]
+edition.workspace = true
+name = "xai-recsys-engine"
+version = "0.2.0"
+
+[[bin]]
+name = "checkpoint-server"
+path = "src/bin/checkpoint_server.rs"
+
+[features]
+rdma-tests = []
+
+[dependencies]
+arrow = { workspace = true }
+async-trait = { workspace = true }
+autometrics = { workspace = true }
+axum = { workspace = true }
+bincode = { workspace = true }
+bytemuck = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+crc32c = { workspace = true }
+env_logger = { workspace = true }
+futures = { workspace = true }
+half = { workspace = true }
+google-cloud-auth = { workspace = true }
+google-cloud-storage = { version = "1" }
+object_store = { workspace = true, features = ["aws", "gcp"] }
+url = { workspace = true }
+http-body = { workspace = true }
+http-body-util = { workspace = true }
+lazy_static = { workspace = true }
+log = { workspace = true }
+moka = { workspace = true, features = ["future"] }
+md5 = { workspace = true }
+libc = { workspace = true }
+memmap2 = { workspace = true }
+murmur3 = { workspace = true }
+nix = { workspace = true, features = ["fs", "uio"] }
+num = { workspace = true }
+num_cpus = { workspace = true }
+numpy = { workspace = true }
+parking_lot = { workspace = true }
+prometheus = { workspace = true }
+prost = { workspace = true }
+pyo3 = { workspace = true, features = ["chrono"] }
+rand = { workspace = true }
+rayon = { workspace = true }
+scopeguard = { workspace = true }
+serde_json = { workspace = true }
+simd-adler32 = { workspace = true }
+static_assertions = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tonic = { workspace = true }
+tonic-health = { workspace = true }
+tower = { workspace = true }
+zstd = { workspace = true }
+tonic-reflection = { workspace = true }
+xai-recsys = { workspace = true }
+xai-recsys-proto = { workspace = true }
+xai-recsys-server = { workspace = true }
+xai-recsys-sid-proto = { workspace = true }
+xai-recsys-mm-server = { workspace = true }
+xai-o2 = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ibverbs = { workspace = true }
+
+[dev-dependencies]
+rcgen = { workspace = true }
+serial_test = { workspace = true }
+tempfile = { workspace = true }
+tokio-stream = { workspace = true }
+
+[lints]
+workspace = true

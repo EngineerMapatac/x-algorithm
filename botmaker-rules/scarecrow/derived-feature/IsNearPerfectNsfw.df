@@ -1,0 +1,10 @@
+description:\nexpression: |
+  {
+    val :new = IsNearPerfectNsfwNewModelLogic;
+    if (:new) {
+      IncrementStat(Join("/", "New_Model", "Near_Perfect", "Migration"), 1);
+    }
+    :new
+  }
+logged: 'false'
+returnType: BooleanValue

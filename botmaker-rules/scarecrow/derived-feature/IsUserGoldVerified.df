@@ -1,0 +1,13 @@
+description:\nexpression: |
+  params(Long :userId)
+  {
+    val :verifiedType = GetUser(:userId).safety.verified_type;
+
+    if (:verifiedType != NULL) {
+      ToLower(:verifiedType) == "business";
+    } else {
+      FALSE;
+    }
+  }
+logged: 'true'
+returnType: Auto

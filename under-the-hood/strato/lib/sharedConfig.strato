@@ -1,0 +1,23 @@
+val contactInfo = {
+  contactEmail = "your_ldap@twitter.com",
+  ldapGroup = "birdwatch-team",
+  slackRoomId = "birdwatch-eng",
+  jiraProject = "BWATCH"
+}
+
+val mhUnderTheHoodConfig = {
+  dest = "/s/manhattan/apollo.native-thrift",
+  appId = "under_the_hood_ro",
+  user_month_dataset = "user_month_aggregates",
+  reference_month_dataset = "reference_month_aggregates",
+}
+
+Library({
+  export = {
+    contactInfo = contactInfo,
+    mhUnderTheHoodConfig = mhUnderTheHoodConfig,
+  },
+  description = PlainText("Common info across under-the-hood columns"),
+  contactInfo = contactInfo,
+  lifecycle = Production,
+})

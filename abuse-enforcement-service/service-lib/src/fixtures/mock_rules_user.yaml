@@ -1,0 +1,24 @@
+for_entity: user
+rules:
+  - id: allowlisted
+    when: user_allowlist.is_allowlisted
+    then: { kind: skip, reason: allowlisted }
+  - id: not_present
+    when: "!user.present"
+    then: { kind: skip, reason: not_present }
+  - id: cred_skip
+    when: cred.is_high || cred.follower_count >= 12.34 || cred.score >= 7.5
+    then: { kind: skip, reason: cred_skip }
+  - id: composite
+    when: '"composite_label" in score.labels'
+    then:
+      kind: act_all
+      actions:
+        - { kind: act_add_labels_v2, labels: ["MockLabel"], ttl_msec: 1000 }
+        - { kind: act_captcha }
+  - id: label_only
+    when: '"label_only" in score.labels'
+    then: { kind: act_add_labels_v2, labels: ["MockLabel"], ttl_msec: 1000 }
+  - id: suspend_default
+    when: "true"
+    then: { kind: act_suspend_user, perm: false, policy: "TestPolicy" }

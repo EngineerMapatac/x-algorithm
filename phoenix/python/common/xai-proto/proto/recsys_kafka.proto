@@ -1,0 +1,75 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 X.AI Corp.
+syntax = "proto3";
+
+package xai.recsys_kafka.v1;
+
+message KafkaMessage {
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+  int64 timeMs = 4;
+  bytes value = 5;
+}
+
+message PartitionOffset {
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+}
+message SeekOffsets {
+  repeated PartitionOffset offsets = 1;
+}
+
+message SeekRequest {
+  oneof seek_type {
+    SeekOffsets offsets = 1;
+    int64 timestampMs = 2;
+    bool latest = 3;
+  }
+}
+
+message FetchMessageRequest {
+  int32 client_id = 1;
+  int32 event_count_to_fetch = 2;
+}
+
+message InitClientRequest {
+  repeated int32 register_client_ids = 1;
+  SeekRequest seek_request = 2;
+}
+
+message CheckStateRequest {}
+
+message FetchMessageResponse {
+  int32 error_code = 1;
+  string error_message = 2;
+  repeated KafkaMessage messages = 3;
+}
+
+message CheckStateResponse {
+  string processor_state = 1;
+  int32 shard_index = 2;
+  int32 num_shards = 3;
+  int32 processor_index = 4;
+  int32 num_processors = 5;
+  string registered_topic = 6;
+  string registered_group_id = 7;
+  repeated int32 registered_partitions = 8;
+  repeated int32 registered_clients = 9;
+  map<int32, int32> client_queue_sizes = 10;
+  map<int32, int32> partition_queue_sizes = 11;
+}
+
+message InitClientResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+service KafkaDispatcher {
+  rpc FetchMessage(FetchMessageRequest) returns (FetchMessageResponse) {}
+
+  rpc InitClientMessage(InitClientRequest) returns (InitClientResponse) {}
+
+  rpc CheckState(CheckStateRequest) returns (CheckStateResponse) {}
+}

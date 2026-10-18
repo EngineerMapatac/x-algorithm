@@ -1,0 +1,11 @@
+scala_library(
+    compiler_option_sets = ["fatal_warnings"],
+    dependencies = [
+        "3rdparty/jvm/org/yaml:snakeyaml",
+        "util/util-core/src/main/scala/com/twitter/io",
+    ],
+    platform = "java8",
+    sources = ["*.scala"],
+    strict_deps = True,
+    tags = ["bazel-compatible"],
+)

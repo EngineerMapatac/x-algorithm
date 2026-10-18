@@ -1,0 +1,22 @@
+id: '6754'
+description:\nevent: url_event
+condition: |
+  Exists(tcoUserId) &&
+  Exists(tweetId) &&
+  Exists(redirectionChain) &&
+  Count(redirectionChain) > 0 &&
+  !Contains(Set("GOOD", "WHITELIST"), GetUrlVerdict(Last(redirectionChain))) &&
+  Any(:u, GetUrlVerdict(:u) == "LOW_QUALITY", redirectionChain) &&
+  !IsTestUser(spammerId) &&
+  !IsHighPageRankUser(spammerId) &&
+  !Contains(GetLongList(`AutoExpiringTempSkipList`), spammerId) &&
+  !IsUserGrayVerified(spammerId)
+action: |
+  {
+    TweetRtfApplyLabel("SPAM_HIGH_RECALL", tweetId);
+    IncrementStat("url_event_catches/tweet/6754", 1);
+    None();
+  }
+expiry: '2028-02-08T02:44:00Z'
+isActive: 'true'
+owner:\nactionLimits: {}

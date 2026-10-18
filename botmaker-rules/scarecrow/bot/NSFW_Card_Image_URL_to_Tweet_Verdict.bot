@@ -1,0 +1,39 @@
+id: '7413'
+description:\nevent: url_reputation_change
+condition: |
+  Exists(verdict)
+  && Exists(entity)
+  && Exists(matchingType)
+  && verdict == "NSFW_CARD_IMAGE"
+  && (action == "PUT" || action == "DELETE")
+action: |
+  {
+    if (GetLabel("NSFW_Url", entity) != "NSFW_Card_Image_Url") {
+      SetLabel("NSFW_Url", entity, "NSFW_Card_Image_Url", 1 * 60 * 60, FALSE);
+      IncrementStat("Unique_URL_Count", 1);
+    };
+    val :labelType = "NSFW_CARD_IMAGE";
+    val :tweetInfo = GetTweetLabelInfoFromURL(entity, :labelType, TRUE);
+    val :total = DictGetOrElse(:tweetInfo, "total", 0);
+    val :notLabeledTweets = DictGetOrElse(:tweetInfo, "notLabeled", []);
+    val :labeledTweets = DictGetOrElse(:tweetInfo, "labeled", []);
+    val :tweetSafeguard = 5000;
+    if (action == "PUT" && Size(:notLabeledTweets) > 0) {
+      val :limited = SubLongList(ToList(:notLabeledTweets), 0, :tweetSafeguard);
+      for (:tweetId in :limited) {
+        TweetRtfApplyLabel(:labelType, :tweetId);
+        IncrementStat("interstitialed_tweets", 1);
+      };
+      Log("nsfw_card_tweets", Join("\t", action, ToString(:limited)));
+    };
+    if (action == "DELETE") {
+      for (:tweetId in :labeledTweets) {
+        TweetRtfRemoveLabel(:labelType, :tweetId);
+        IncrementStat("remove_interstitialed_tweets", 1);
+      };
+      Log("nsfw_card_tweets", Join("\t", action, ToString(:labeledTweets)));
+    };
+  }
+expiry: +292278994-08-17T07:12:55.807Z
+isActive: 'true'
+owner:\nactionLimits: {}

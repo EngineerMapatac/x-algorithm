@@ -1,0 +1,4 @@
+description:\nexpression: |
+  86400000
+logged: 'false'
+returnType: LongValue

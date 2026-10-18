@@ -1,0 +1,12 @@
+description:\nexpression: |
+  {
+    val :nsfwHighRecallNewModelThresholdForNonVideo = 0.8568428;
+    val :nsfwHighRecallNewModelThresholdForVideo = 0.6;
+
+    Exists(category)
+    && Exists(recallNewNsfw)
+    && ((category != "TWEET_VIDEO" && recallNewNsfw <= :nsfwHighRecallNewModelThresholdForNonVideo)
+    || (category == "TWEET_VIDEO" && recallNewNsfw <= :nsfwHighRecallNewModelThresholdForVideo))
+  }
+logged: 'false'
+returnType: BooleanValue

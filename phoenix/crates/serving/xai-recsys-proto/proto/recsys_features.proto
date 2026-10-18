@@ -1,0 +1,15 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 X.AI Corp.
+syntax = "proto3";
+
+package xai.recsys.v1;
+
+enum ClientAppPlatform {
+  CLIENT_APP_PLATFORM_UNKNOWN = 0;
+  CLIENT_APP_PLATFORM_IOS = 1;
+  CLIENT_APP_PLATFORM_ANDROID = 2;
+  CLIENT_APP_PLATFORM_WEB = 3;
+  CLIENT_APP_PLATFORM_OTHER = 4;
+  CLIENT_APP_PLATFORM_ANDROID_LITE = 5;
+  CLIENT_APP_PLATFORM_IPAD = 6;
+}

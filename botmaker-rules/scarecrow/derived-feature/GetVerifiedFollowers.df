@@ -1,0 +1,12 @@
+description:\nexpression: |
+  params(Long :userId) {
+    val :jsonObj = JsonParse(DoStratoColumnOp(
+      "User",
+      "platform-manipulation/verifiedFollowers",
+      "fetch",
+      ArgsToStratoJson("fetch", :userId, NULL)
+    ));
+    MapGet(:jsonObj, "v")
+  }
+logged: 'false'
+returnType: Auto

@@ -1,0 +1,3 @@
+package com.twitter.botmaker.runtime.config
+
+trait ManhattanConfigs extends ManhattanEndpointConfigs with ManhattanClientConfigs

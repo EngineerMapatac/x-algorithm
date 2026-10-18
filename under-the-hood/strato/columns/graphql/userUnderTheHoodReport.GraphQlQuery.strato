@@ -1,0 +1,4 @@
+Alias({
+  target = #<visibility/under-the-hood/underTheHoodReport>,
+  views = Set(ExternalGraphQl)
+})

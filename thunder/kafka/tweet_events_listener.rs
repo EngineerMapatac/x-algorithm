@@ -5,25 +5,25 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use tokio::sync::RwLock;
-use xai_kafka::{KafkaMessage, config::KafkaConsumerConfig, consumer::KafkaConsumer};
-use xai_kafka::{KafkaProducer, KafkaProducerConfig};
+use xai_kafka::{
+    KafkaMessage, KafkaProducer, KafkaProducerConfig, config::KafkaConsumerConfig,
+    consumer::KafkaConsumer,
+};
+
 use xai_thunder_proto::{
     InNetworkEvent, LightPost, TweetCreateEvent, TweetDeleteEvent, in_network_event,
 };
 
 use crate::{
     args::Args,
-    crate::config::MIN_VIDEO_DURATION_MS,
     deserializer::deserialize_tweet_event,
     kafka::utils::{create_kafka_consumer, deserialize_kafka_messages},
     metrics,
     schema::{tweet::Tweet, tweet_events::TweetEventData},
 };
 
-/// Counter for logging batch processing every Nth time
 static BATCH_LOG_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-/// Monitor Kafka partition lag and update metrics
 async fn monitor_partition_lag(
     consumer: Arc<RwLock<KafkaConsumer>>,
     topic: String,
@@ -69,11 +69,10 @@ fn is_eligible_video(tweet: &Tweet) -> bool {
 
     video_info
         .duration_millis
-        .map(|d| d >= MIN_VIDEO_DURATION_MS)
+        .map(|d| d >= 5_000)
         .unwrap_or(false)
 }
 
-/// Start the partition lag monitoring task in the background
 pub fn start_partition_lag_monitor(
     consumer: Arc<RwLock<KafkaConsumer>>,
     topic: String,
@@ -88,16 +87,16 @@ pub fn start_partition_lag_monitor(
     });
 }
 
-/// Start the tweet event processing loop in the background with configurable number of threads
 pub async fn start_tweet_event_processing(
-    base_config: KafkaConsumerConfig,
-    producer_config: KafkaProducerConfig,
+    base_config: impl Into<KafkaConsumerConfig>,
+    producer_config: impl Into<KafkaProducerConfig>,
     args: &Args,
 ) {
+    let base_config = base_config.into();
+    let producer_config = producer_config.into();
     let num_partitions = args.tweet_events_num_partitions as usize;
     let kafka_num_threads = args.kafka_num_threads;
 
-    // Use all available partitions
     let partitions_to_use: Vec<i32> = (0..num_partitions as i32).collect();
     let partitions_per_thread = num_partitions.div_ceil(kafka_num_threads);
 
@@ -121,7 +120,6 @@ pub async fn start_tweet_event_processing(
     spawn_processing_threads(base_config, partitions_to_use, producer, args);
 }
 
-/// Spawn multiple processing threads, each handling a subset of partitions
 fn spawn_processing_threads(
     base_config: KafkaConsumerConfig,
     partitions_to_use: Vec<i32>,
@@ -157,7 +155,6 @@ fn spawn_processing_threads(
 
             match create_kafka_consumer(thread_config).await {
                 Ok(consumer) => {
-                    // Start partition lag monitoring for this thread's partitions
                     start_partition_lag_monitor(
                         Arc::clone(&consumer),
                         topic,
@@ -189,7 +186,6 @@ fn spawn_processing_threads(
     }
 }
 
-/// Process a batch of messages: deserialize, extract posts, and store them
 async fn process_message_batch(
     messages: Vec<KafkaMessage>,
     batch_num: usize,
@@ -266,12 +262,10 @@ async fn process_message_batch(
                 delete_tweets.push(delete_event.quoting_tweet_id.unwrap());
             }
             _ => {
-                log::info!("Other non post creation/deletion event")
             }
         }
     }
 
-    // Send each LightPost as an InNetworkEvent to the producer in separate tasks (only if producer is enabled)
     if let Some(ref producer) = producer {
         let mut send_tasks = Vec::with_capacity(create_tweets.len());
         for light_post in &create_tweets {
@@ -321,7 +315,6 @@ async fn process_message_batch(
             }));
         }
 
-        // Wait for all send tasks to complete
         for task in send_tasks {
             if let Err(e) = task.await {
                 error!("Error writing to kafka {}", e);
@@ -329,7 +322,6 @@ async fn process_message_batch(
         }
     }
 
-    // Log every 100th batch
     let batch_count = BATCH_LOG_COUNTER.fetch_add(1, Ordering::Relaxed);
     if batch_count.is_multiple_of(1000) {
         info!(
@@ -345,7 +337,6 @@ async fn process_message_batch(
     Ok(())
 }
 
-/// Main message processing loop that polls Kafka, batches messages, and stores posts
 async fn process_tweet_events(
     consumer: Arc<RwLock<KafkaConsumer>>,
     batch_size: usize,
@@ -365,14 +356,12 @@ async fn process_tweet_events(
             Ok(messages) => {
                 message_buffer.extend(messages);
 
-                // Process batch when we have enough messages
                 if message_buffer.len() >= batch_size {
                     batch_num += 1;
 
                     let messages = std::mem::take(&mut message_buffer);
                     let producer_clone = producer.clone();
 
-                    // Spawn batch processing in a blocking task
                     process_message_batch(messages, batch_num, producer_clone, post_retention_sec)
                         .await
                         .context("Error processing tweet event batch")?;

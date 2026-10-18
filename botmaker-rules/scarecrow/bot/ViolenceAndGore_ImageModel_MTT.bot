@@ -1,0 +1,107 @@
+id: '20616'
+description:\nevent: media_update
+condition: |
+  Exists(category) &&
+  Exists(spammerId) &&
+  Exists(mediaId) &&
+  Exists(eventThrift) &&
+  !IsTestUser(spammerId) &&
+  {
+    val :precisionThreshold = if (category == "TWEET_IMAGE") { 0.6 };
+    val :rawScoreThreshold =
+      if (category == "TWEET_VIDEO") { 0.95 }
+      else if (category == "AVATAR_IMAGE") { 0.85 }
+      else if (category == "BANNER_IMAGE") { 0.85 };
+    val :usePrecisionThreshold = category == "TWEET_IMAGE";
+    val :useRawScoreThreshold =
+      category == "TWEET_VIDEO" ||
+      category == "AVATAR_IMAGE" ||
+      category == "BANNER_IMAGE";
+    val :thrift = ToThrift("com.twitter.mediaservices.commons.media_update.thrift_java.MediaUpdate", eventThrift);
+    if (
+      :thrift.update_info != NULL &&
+      :thrift.update_info.escherbird_annotations != NULL &&
+      :thrift.update_info.escherbird_annotations.mediaAnnotations != NULL
+    ) {
+      val :media_annotations = :thrift.update_info.escherbird_annotations.mediaAnnotations;
+      if (:usePrecisionThreshold || :useRawScoreThreshold) {
+        Any(:iter, :iter == TRUE,
+          Flatten(
+            for (:media_entity_annotations in :media_annotations) {
+              if (:media_entity_annotations.annotations != NULL) {
+                for (:annotation in :media_entity_annotations.annotations) {
+                  :annotation.domainId == 140 &&
+                  :annotation.groupId == 34 &&
+                  :annotation.entityId == 1199070453920223232 &&
+                  if (:usePrecisionThreshold) {
+                    val :precision = CacheGet("20616_vg_score", :media_entity_annotations.precision);
+                    :precision > :precisionThreshold
+                  } else if (:useRawScoreThreshold) {
+                    val :raw_score = CacheGet("20616_vg_score", :media_entity_annotations.raw_score);
+                    :raw_score >= :rawScoreThreshold
+                  }
+                }
+              } else { FALSE }
+            }
+          )
+        );
+      } else { FALSE }
+    } else { FALSE }
+  }
+action: |
+  {
+    import com.twitter.useng.rtp.core.thriftjava.Entity;
+    import com.twitter.useng.rtp.core.thriftjava.Tweet;
+    import com.twitter.useng.rtp.core.thriftjava.ProfileHeaderV2;
+    import com.twitter.useng.rtp.core.thriftjava.ProfilePhotoV2;
+    val :score = CacheGet("20616_vg_score", -1.0);
+    val :tweetId = GetOrElse(tweetId, -1);
+    val :entity = if (category == "TWEET_IMAGE" || category == "TWEET_VIDEO") {
+      Entity(
+        "tweet" : Tweet(
+          "tweetId" : tweetId,
+          "authorUserId" : spammerId
+        )
+      );
+    } else if (category == "AVATAR_IMAGE") {
+      Entity(
+        "profilePhotoV2" : ProfilePhotoV2(
+          "mediaCategory" : category,
+          "mediaId" : mediaId,
+          "userId" : spammerId
+        )
+      );
+    } else if (category == "BANNER_IMAGE") {
+      Entity(
+        "profileHeaderV2" : ProfileHeaderV2(
+          "mediaCategory" : category,
+          "mediaId" : ToLong(Concat(ToString(mediaId), "000")),
+          "userId" : spammerId
+        )
+      );
+    };
+    if (category == "AVATAR_IMAGE" || category == "BANNER_IMAGE") {
+      val :note = Concat("Sent for manual review for ", category);
+      CreateRtpReportAsyncProd(:entity, spammerId, "MEDIA_PROACTIVE_REVIEW", RULE_ID, category);
+      IncrementStat("bot_20616_enqueued_report", 1);
+    } else if (Exists(tweetId)) {
+      if (
+        !IsHighPageRankUser(spammerId) &&
+        !Contains(GetLongList(`AutoExpiringTempSkipList`), spammerId) &&
+        !IsUserGrayVerified(spammerId)
+      ) {
+        val :threshold = if (category == "TWEET_IMAGE") { 0.6 } else if (category == "TWEET_VIDEO") { 0.95 }
+        TweetRtfApplyLabel("GORE_AND_VIOLENCE_HIGH_PRECISION", tweetId);
+        val :note = Concat("go/bot/", RULE_ID, ". Tweet ", tweetId, " contained media (",category,")", mediaId, " with a violence and gore precision score >= ", :threshold);
+        AddGuanoNote(spammerId, TwitterSafetyUserId, :note);
+        IncrementStat("bot_20616_actioned", 1)
+      } else {
+        CreateRtpReportAsyncProd(:entity, spammerId, "MEDIA_PROACTIVE_REVIEW", RULE_ID, category);
+        IncrementStat("bot_20616_enqueued_report", 1)
+      }
+    };
+    Log("20616/mediaUnderstandingViolenceGoreScore", :score);
+  }
+expiry: '2050-03-01T19:45:59.522Z'
+isActive: 'true'
+owner:\nactionLimits: {}

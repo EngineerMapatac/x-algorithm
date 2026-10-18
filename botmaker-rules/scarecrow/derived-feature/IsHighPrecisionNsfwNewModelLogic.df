@@ -1,0 +1,7 @@
+description:\nexpression: |
+  {
+    val :nsfwHighPrecisionNewModelThreshold = 0.95;
+    Exists(precisionNewNsfw) && precisionNewNsfw >= :nsfwHighPrecisionNewModelThreshold
+  }
+logged: 'false'
+returnType: BooleanValue

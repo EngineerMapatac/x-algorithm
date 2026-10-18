@@ -1,0 +1,77 @@
+id: '21711'
+description:\nevent: bqbm_scheduled_queries
+condition: |
+  Exists(entityId) &&
+  Exists(jobName) &&
+  Exists(notes) &&
+  (
+    jobName == "bbq_duplicate_text_unigrams" ||
+    jobName == "bbq_duplicate_text_characters_cjk"
+  ) &&
+  entityType == "tweetIdCluster"
+action: |
+  {
+    val :prodJobName = Concat(jobName, "_prod");
+    val :maxGuanoNotes = 1;
+    val :eligibleTweets = Filter(
+      :longTweetId,
+      {
+        !HasBigQuerytoBotmakerLabel(:prodJobName, ToString(:longTweetId)) &&
+        !Contains(GetTweetRtfLabels(:longTweetId), "COPYPASTA_SPAM") &&
+        TryOrElse(GetTweet(:longTweetId).card2.name != "promo_video_convo", FALSE) &&
+        TryOrElse(GetTweet(:longTweetId).card2.name != "promo_image_convo", FALSE)
+      },
+      StringIdListToLongList(entityId)
+    );
+    val :actionableTweets = Filter(
+      :tweetId,
+      {
+        val :tweetAuthor = GetTweetAuthorId(:tweetId);
+        !IsTestUser(:tweetAuthor) &&
+        !IsHighPageRankUser(:tweetAuthor) &&
+        !Contains(GetLongList(`AutoExpiringTempSkipList`), :tweetAuthor) &&
+        !IsUserGrayVerified(:tweetAuthor)
+      },
+      :eligibleTweets
+    );
+    val :unactionableTweets = SetDiff(ToSet(:eligibleTweets), ToSet(:actionableTweets));
+    val :rateLimitThreshold = 1000 * 100;
+    val :rateLimitTimePeriod = OneMinuteInSecs;
+    val :downrankNote = Concat("go/bot/", ToString(RULE_ID), ": ", jobName, " tweet labeled COPYPASTA_SPAM");
+    if (Length(:actionableTweets) > 0) {
+      RateLimited(
+        {
+          for (:tweetId in :actionableTweets) {
+            val :tweetUserId = TryOrElse(GetTweetAuthorId(:tweetId), -1);
+            TweetRtfApplyLabel("COPYPASTA_SPAM", :tweetId);
+            SetBigQuerytoBotmakerLabel(:prodJobName, ToString(:tweetId));
+            if (:tweetUserId != -1) {
+              val :guanoNote = Concat(
+                 "go/bot/",
+                 RULE_ID,
+                 ": applied COPYPASTA_SPAM label to tweet ",
+                 :tweetId
+              );
+              AddTwitterSupportGuanoNote(
+                :tweetUserId,
+                :guanoNote,
+                :maxGuanoNotes
+              );
+            }
+          }
+        },
+        :rateLimitTimePeriod,
+        :rateLimitThreshold,
+        jobName,
+        {
+          Log("BBQDuplicateTextProd_rate_limited", :actionableTweets);
+        }
+      );
+    }
+    if (Length(:unactionableTweets) > 0) {
+      Log("BBQDuplicateTextRepliesProd_unactionable_tweets", :unactionableTweets);
+    }
+  }
+expiry: '2027-02-21T03:14:23.214Z'
+isActive: 'true'
+owner:\nactionLimits: {}

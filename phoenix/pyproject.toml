@@ -1,14 +1,77 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 X.AI Corp.
 [project]
-name = "grok-1"
+name = "phoenix-recsys"
 version = "0.1.0"
-description = "Grok-1 model"
+description = "Phoenix — X's open-source recommendation algorithm (ranking + retrieval, single-host JAX)."
 readme = "README.md"
 requires-python = ">=3.11"
+license = { file = "LICENSE" }
 dependencies = [
-    "dm-haiku>=0.0.13",
-    "jax==0.8.1",
+    "dm-haiku==0.0.16",
+    "jax[cuda12]==0.8.1 ; sys_platform == 'linux'",
+    "jax==0.8.1 ; sys_platform == 'darwin'",
     "numpy>=1.26.4",
-    "pyright>=1.1.408",
+    "optax>=0.2.4",
+    "chex>=0.1.86",
+    "numba>=0.60.0",
+    "flatbuffers",
+
+    "grpcio>=1.66.0",
+    "protobuf>=5.28.0",
+    "xai-proto",
+    "pyarrow>=17.0.0",
+    "aiokafka>=0.11.0",
+
+    "pandas>=2.2.0",
+    "pyserde>=0.21.0",
+    "typing_extensions>=4.12.0",
+    "cloudpickle>=3.0.0",
+
+    "orbax-checkpoint==0.9.1",
+    "tensorstore>=0.1.65",
+    "zstandard>=0.23.0",
+    "filelock>=3.13.0",
+
+    "xai-configlib",
+    "xai-gimmick",
+    "xai-checkpointing",
+
+    "opentelemetry-api>=1.27.0",
+    "opentelemetry-sdk>=1.27.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.27.0",
+    "prometheus-client>=0.20.0",
+    "psutil>=5.9.0",
+]
+
+[project.optional-dependencies]
+engine = [
+    "xai-recsys-engine",
+    "cupy-cuda12x>=13.6.0 ; sys_platform == 'linux'",
+    "py-libnuma==1.2 ; sys_platform == 'linux'",
+]
+mm-encoder = [
+    "transformers>=4.57.0",
+    "sentence-transformers>=5.4.0",
+    "torch>=2.8.0",
+    "pillow>=10.0.0",
+    "httpx>=0.27.0",
+]
+telemetry = [
+    "wandb>=0.18.0",
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "boto3>=1.35.0",
+    "clickhouse-connect>=0.8.0",
+]
+sid-train = [
+    "safetensors>=0.4.0",
+]
+fa4 = [
+    "nvidia-cutlass-dsl>=4.4.2,<4.6 ; sys_platform == 'linux'",
+    "quack-kernels>=0.4.0,<0.5 ; sys_platform == 'linux'",
+    "cuda-python>=12.9,<13 ; sys_platform == 'linux'",
+    "torch>=2.8.0 ; sys_platform == 'linux'",
 ]
 
 [tool.uv]
@@ -17,22 +80,12 @@ environments = [
     "sys_platform == 'linux'",
 ]
 
+[tool.uv.sources]
+xai-recsys-engine = { path = "crates/serving/xai-recsys-engine" }
+xai-proto = { path = "python/common/xai-proto" }
+xai-configlib = { path = "python/common/xai-configlib" }
+xai-gimmick = { path = "python/common/xai-gimmick" }
+xai-checkpointing = { path = "python/training/xai-checkpointing" }
+
 [tool.ruff]
-indent-width = 4
 line-length = 100
-
-[tool.ruff.lint]
-ignore = [
-    "E722",
-    "E731",
-    "E741",
-    "F405",
-    "E402",
-    "F403",
-]
-select = ["ISC001"]
-
-[dependency-groups]
-dev = [
-    "pytest",
-]

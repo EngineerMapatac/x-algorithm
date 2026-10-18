@@ -1,32 +1,70 @@
-use std::any::{Any, type_name_of_val};
-use tonic::async_trait;
-
+use crate::candidate_pipeline::{PipelineCandidate, PipelineQuery, PipelineStage};
+use crate::pipeline_summary::ComponentStats;
 use crate::util;
+use crate::SPAN_LEVEL;
+use std::any::{type_name_of_val, Any};
+use tracing::{field::Empty, Span};
+use xai_stats_receiver::global_stats_receiver;
 
 pub struct FilterResult<C> {
     pub kept: Vec<C>,
     pub removed: Vec<C>,
 }
 
-/// Filters run sequentially and partition candidates into kept and removed sets
-#[async_trait]
 pub trait Filter<Q, C>: Any + Send + Sync
 where
-    Q: Clone + Send + Sync + 'static,
-    C: Clone + Send + Sync + 'static,
+    Q: PipelineQuery,
+    C: PipelineCandidate,
 {
-    /// Decide if this filter should run for the given query
     fn enable(&self, _query: &Q) -> bool {
         true
     }
 
-    /// Filter candidates by evaluating each against some criteria.
-    /// Returns a FilterResult containing kept candidates (which continue to the next stage)
-    /// and removed candidates (which are excluded from further processing).
-    async fn filter(&self, query: &Q, candidates: Vec<C>) -> Result<FilterResult<C>, String>;
+    #[xai_stats_macro::receive_stats(latency=Bucket0To50)]
+    #[tracing::instrument(level = SPAN_LEVEL, skip_all, name = "filter", fields(
+        name = self.name(),
+        input_count = candidates.len(),
+        kept_count = Empty,
+        removed_count = Empty,
+        filter_rate = Empty,
+    ))]
+    fn run(&self, query: &Q, candidates: Vec<C>, stage: PipelineStage) -> FilterResult<C> {
+        let stats = ComponentStats::begin(stage, self.name(), type_name_of_val(self));
+        let result = self.filter(query, candidates);
+        stats.finish_filter(result.kept.len(), result.removed.len());
+        let total = result.kept.len() + result.removed.len();
+        let rate = if total > 0 {
+            result.removed.len() as f64 / total as f64
+        } else {
+            0.0
+        };
+        let span = Span::current();
+        span.record("kept_count", result.kept.len());
+        span.record("removed_count", result.removed.len());
+        span.record("filter_rate", format!("{:.3}", rate).as_str());
+        self.stat(&result, stage);
+        result
+    }
 
-    /// Returns a stable name for logging/metrics.
+    fn filter(&self, query: &Q, candidates: Vec<C>) -> FilterResult<C>;
+
     fn name(&self) -> &'static str {
         util::short_type_name(type_name_of_val(self))
+    }
+
+    fn stat(&self, result: &FilterResult<C>, stage: PipelineStage) {
+        if let Some(receiver) = global_stats_receiver() {
+            let metric_name = format!("{}.run", self.name());
+            receiver.incr(
+                metric_name.as_str(),
+                &stage.stat_labels(self.name(), "kept"),
+                result.kept.len() as u64,
+            );
+            receiver.incr(
+                metric_name.as_str(),
+                &stage.stat_labels(self.name(), "removed"),
+                result.removed.len() as u64,
+            );
+        }
     }
 }

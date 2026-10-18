@@ -1,0 +1,53 @@
+alias(
+    name = "media-model-proxy",
+    target = ":media-model-proxy-lib",
+)
+
+target(
+    name = "media-model-proxy-lib",
+    dependencies = [
+        "media-understanding/media-model-proxy/src/main/scala/com/twitter/media_understanding/model_proxy/app",
+    ],
+)
+
+jvm_binary(
+    name = "bin",
+    basename = "media-model-proxy",
+    dependencies = [
+        ":configs",
+        ":media-model-proxy",
+        "3rdparty/jvm/ch/qos/logback:logback-classic",
+        "3rdparty/jvm/org/slf4j:jul-to-slf4j",
+        "loglens/loglens-logback/src/main/scala/com/twitter/loglens/logback",
+        "media-understanding/common:logback",
+        "twitter-server/logback-classic",
+    ],
+    main = "com.twitter.media_understanding.model_proxy.app.MediaModelProxyThriftServerMain",
+    runtime_platform = "java11",
+    tags = ["bazel-compatible"],
+)
+
+jvm_app(
+    name = "bundle",
+    archive = "zip",
+    basename = "media-model-proxy-service-package-dist",
+    binary = ":bin",
+    bundles = [
+        bundle(
+            fileset = [
+                "config/decider.yml",
+            ],
+            rel_path = "media-understanding/media-model-proxy",
+        ),
+    ],
+    tags = ["bazel-compatible"],
+)
+
+files(
+    name = "configs",
+    sources = [
+        "aurora/*.aurora",
+        "aurora/*.workflow.json",
+        "aurora/*.yml",
+    ],
+)

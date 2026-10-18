@@ -1,0 +1,38 @@
+id: '20790'
+description:\nevent: url_reputation_change
+condition: |
+  Exists(verdict) &&
+  verdict == "UNSAFE" &&
+  Exists(action) &&
+  (action == "PUT" || action == "DELETE")
+action: |
+  DoAsync(
+    {
+      val :tcos = GetSlugsForUrl(entity, ToLong(ToString(matchingType)));
+      val :ids = for (:t in :tcos) { Last(SplitString(:t, "/")) };
+      val :tweetIds = GetTweetIdsForSlugs(:ids);
+      if (Length(:tweetIds) != 0) {
+        IncrementStat(Join("/", "URLBlacklistBackfill", "Any"), Length(:tweetIds));
+        IncrementStat(Join("/", "URLBlacklistBackfill", action), Length(:tweetIds));
+        for (:tweetId in :tweetIds) {
+          if (action == "PUT") {
+            TweetRtfApplyLabel("SEARCH_BLACKLIST", :tweetId);
+            TweetRtfApplyLabel("DO_NOT_AMPLIFY", :tweetId);
+            TweetRtfApplyLabel("UNSAFE_URL", :tweetId);
+            TweetRtfApplyLabel("MALICIOUS_URL", :tweetId);
+          } else {
+            TweetRtfRemoveLabel("SEARCH_BLACKLIST", :tweetId);
+            TweetRtfRemoveLabel("DO_NOT_AMPLIFY", :tweetId);
+            TweetRtfRemoveLabel("UNSAFE_URL", :tweetId);
+            TweetRtfRemoveLabel("MALICIOUS_URL", :tweetId);
+          };
+        };
+        Log("TweetIds with RTF Action", Join("\t", "SEARCH_BLACKLIST", action, ToString(:tweetIds)));
+        Log("TweetIds with RTF Action", Join("\t", "DO_NOT_AMPLIFY", action, ToString(:tweetIds)));
+        Log("TweetIds with RTF Action", Join("\t", "UNSAFE_URL", action, ToString(:tweetIds)));
+      }
+    }
+  )
+expiry: +292278994-08-17T07:12:55.807Z
+isActive: 'true'
+owner:\nactionLimits: {}

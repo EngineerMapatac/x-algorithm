@@ -1,0 +1,25 @@
+id: '24603'
+description:\nevent: grok_share
+condition: |
+  Exists(grokMediaIds) &&
+  Exists(shareId) &&
+  Length(shareId) > 0 &&
+  Any(:grokMediaId,
+    GetLabel("GrokMediaNsfwDetection", ToString(:grokMediaId)) != "",
+    grokMediaIds
+  )
+action: |
+  {
+    val :nsfwTags = for(:grokMediaId in grokMediaIds) { GetLabel("GrokMediaNsfwDetection", ToString(:grokMediaId)) };
+    val :url = Concat("https://x.com/i/grok/share/", Trim(shareId));
+    val :urlVerdict = GetUrlVerdictV2(:url);
+    val :verdict = DictGetOrElse(:urlVerdict, "verdict", "UNKNOWN");
+    if (:verdict != "NSFW_CARD_IMAGE" && :verdict != "BAD") {
+      WriteUrlVerdictsV2(Set(:url), "NSFW_CARD_IMAGE", 86400 * 7, "EXACT_URL_MATCH","updating reputation store for NSFW detection","botmaker", "bot_24603");
+      IncrementStat("Grok_URLs_added_as_NSFW_CARD_IMAGE_in_Rep_Store", 1);
+      Log("nsfw_card_url_grok_share_log", :url);
+    }
+  }
+expiry: '2029-11-22T17:50:09.833Z'
+isActive: 'true'
+owner:\nactionLimits: {}

@@ -1,0 +1,31 @@
+id: '20998'
+description:\nevent: tweet
+condition: |
+  Exists(tweetId) &&
+  Exists(spammerId) &&
+  !IsTestUser(spammerId) &&
+  {
+    val :scores = CacheGet(
+      "bot_20998_agatha_scores",
+      GetUserHealthScores(spammerId, List("AgathaAllSpamReportsPerFav", "AgathaSpamSuspended"))
+    );
+    val :allSpamReportsPerFavScore = DictGetOrElse(:scores, "AgathaAllSpamReportsPerFav", -1.0);
+    val :spamSuspendedScore = DictGetOrElse(:scores, "AgathaSpamSuspended", -1.0);
+    :allSpamReportsPerFavScore > 0.9975 || :spamSuspendedScore > 0.98
+  } &&
+  !IsHighPageRankUser(spammerId) &&
+  !Contains(GetLongList(`AutoExpiringTempSkipList`), spammerId) &&
+  !IsUserGrayVerified(spammerId)
+action: |
+  {
+    DoAsync(
+      SetTweetRtfApplyLabelWithExpirationMs(
+        "AGATHA_SPAM",
+        tweetId,
+        CurrentTimeMs() + (OneWeekInSecs * 1000)
+      )
+    );
+  }
+expiry: '2029-09-25T13:38:02.674Z'
+isActive: 'true'
+owner:\nactionLimits: {}

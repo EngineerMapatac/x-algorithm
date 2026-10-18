@@ -1,0 +1,54 @@
+id: '5239'
+description:\nevent: url_event
+condition: |
+  Exists(tweetId) &&
+  Exists(redirectionChain) &&
+  Exists(isReply) &&
+  Exists(isRetweet) &&
+  !isReply &&
+  !isRetweet &&
+  Count(redirectionChain) > 0 &&
+  {
+    val :authorId = if (
+      Exists(originalTweetId) &&
+      originalTweetId != 0 &&
+      originalTweetId != tweetId
+    ) {
+      TryOrElse(ToLong(GetMapValue(GetTweetInfo(originalTweetId), "user_id")), -1)
+    } else {
+      tcoUserId
+    };
+    :authorId > 0 &&
+    GetUrlVerdictForSingleChain(redirectionChain) MATCHES "LOW_QUALITY" &&
+    Count(Filter(
+      :victimId,
+      !IsFollowing(GetUserIdFromScreenName(:victimId), :authorId),
+      GetMentionedScreenNames(GetTweetText(tweetId))
+    )) > 0 &&
+    !IsTestUser(spammerId) &&
+    !IsHighPageRankUser(spammerId) &&
+    !Contains(GetLongList(`AutoExpiringTempSkipList`), spammerId) &&
+    !IsUserGrayVerified(spammerId)
+  }
+action: |
+  {
+    val :activeTweetId = if (
+      Exists(originalTweetId) &&
+      originalTweetId != 0
+    ) {
+      originalTweetId
+    } else {
+      tweetId
+    };
+    val :label = "lowquality";
+    val :verdict = GetUrlVerdictForSingleChain(redirectionChain);
+    if (:verdict MATCHES "LOW_QUALITY") {
+      TweetRtfApplyLabel("SPAM_HIGH_RECALL", :activeTweetId);
+      IncrementStat("url_event_catches/tweet/5239", 1);
+    };
+    Log(Join("_", "url", "async", "tweet", :label, "5239"), "1");
+    IncrementStat(Join("_", "url_async_tweet", :label, "5239"), 1);
+  }
+expiry: +292278994-08-17T07:12:55.807Z
+isActive: 'true'
+owner:\nactionLimits: {}

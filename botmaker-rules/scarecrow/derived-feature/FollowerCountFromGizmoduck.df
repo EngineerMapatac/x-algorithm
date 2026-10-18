@@ -1,0 +1,7 @@
+description:\nexpression: |
+  params(Long :userId)
+  {
+    GetUser(:userId).counts.followers
+  }
+logged: 'false'
+returnType: LongValue

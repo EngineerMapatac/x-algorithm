@@ -1,0 +1,459 @@
+import <strato/featureswitches>
+
+type SafetyLabelType = com.twitter.spam.rtf.SafetyLabelType
+type UserLabelValue = com.twitter.gizmoduck.LabelValue
+
+type PostLabelSelector = {
+  anyOf: Seq[String],
+  allOf: Seq[String]
+}
+
+type PostLabelCountCondition = {
+  windowSize: Int,
+  minimumMatchingPosts: Int,
+  maxPostAgeDays: Int,
+  mediaOnly: Option[Boolean],
+  postLabels: PostLabelSelector
+}
+
+type AllOfPostLabelConditions = {
+  allOf: Seq[PostLabelCountCondition]
+}
+
+type RuleCondition = {
+  anyOf: Seq[AllOfPostLabelConditions]
+}
+
+type UserExclusions = {
+  nsfwUser: Boolean,
+  nsfwAdmin: Boolean,
+  highPageRankOrGreyBadge: Option[Boolean],
+  userLabels: Seq[String]
+}
+
+type UserLabelRule = {
+  id: String,
+  enabled: Boolean,
+  triggerPostLabels: Seq[String],
+  maxTriggerPostAgeDays: Int,
+  condition: RuleCondition,
+  applyUserLabel: String,
+  userLabelTtlDays: Int,
+  exclusions: UserExclusions
+}
+
+type RuleConfig = {
+  rules: Seq[UserLabelRule]
+}
+
+type UserContext = {
+  nsfwUser: Boolean,
+  nsfwAdmin: Boolean,
+  highPageRankOrGreyBadge: Boolean,
+  userLabels: Set[String]
+}
+
+type PostLabelData = {
+  tweetId: Long,
+  labels: Set[SafetyLabelType],
+  hasMedia: Boolean
+}
+
+type UserLabelOutput = {
+  labelValue: UserLabelValue,
+  ttlDays: Int
+}
+
+val ruleConfigParser = Json.parser[RuleConfig]()
+
+def parseConfig(rawConfig: String): RuleConfig = {
+  try {
+    ruleConfigParser.parse(rawConfig)
+  } catch {
+    case _ => { rules = Seq.empty }
+  }
+}
+
+def isRecentPost(tweetId: Long, maxAgeDays: Int): Boolean = {
+  maxAgeDays > 0 &&
+    Snowflake.getTime(tweetId).getOrElse(Time.now).inSeconds >= Time.now.minus(maxAgeDays.days).inSeconds
+}
+
+def normalizeLabel(label: String): String = {
+  label.replaceAll("_", "").toLowerCase
+}
+
+def labelsEqual(left: String, right: String): Boolean = {
+  normalizeLabel(left) == normalizeLabel(right)
+}
+
+def safetyLabelFromConfig(label: String): Option[SafetyLabelType] = {
+  Thrift.enumArms[SafetyLabelType].find { value =>
+    labelsEqual(Thrift.labelOfEnum(value), label)
+  }
+}
+
+val allowedApplyUserLabels = Set(
+  "POSSIBLY_NSFW_ACCOUNT",
+  "NSFW_HIGH_PRECISION"
+)
+val maxConfiguredRules = 10
+val maxConditionGroups = 10
+val maxConditionsPerGroup = 10
+val maxConfiguredWindowSize = 10
+val maxConfiguredMinimumMatchingPosts = 11
+val maxConfiguredPostAgeDays = 60
+val maxConfiguredUserLabelTtlDays = 7
+val mediaOnlyScanMultiplier = 4
+
+def userLabelFromConfig(label: String): Option[UserLabelValue] = {
+  if (allowedApplyUserLabels.exists { allowed => labelsEqual(allowed, label) }) {
+    Thrift.enumArms[UserLabelValue].find { value =>
+      labelsEqual(Thrift.labelOfEnum(value), label)
+    }
+  } else {
+    None
+  }
+}
+
+def triggeredRules(
+  rules: Seq[UserLabelRule],
+  eventLabel: String,
+  eventTweetId: Long
+): Seq[UserLabelRule] = {
+  rules.filter { rule =>
+    rule.enabled &&
+      rule.triggerPostLabels.exists { label => labelsEqual(label, eventLabel) } &&
+      isRecentPost(eventTweetId, rule.maxTriggerPostAgeDays)
+  }
+}
+
+def isExcluded(rule: UserLabelRule, user: UserContext): Boolean = {
+  (rule.exclusions.nsfwUser && user.nsfwUser) ||
+    (rule.exclusions.nsfwAdmin && user.nsfwAdmin) ||
+    (rule.exclusions.highPageRankOrGreyBadge.getOrElse(false) && user.highPageRankOrGreyBadge) ||
+    rule.exclusions.userLabels.exists { excludedLabel =>
+      user.userLabels.exists { userLabel => labelsEqual(excludedLabel, userLabel) }
+    }
+}
+
+def isMediaOnly(condition: PostLabelCountCondition): Boolean = {
+  condition.mediaOnly.getOrElse(false)
+}
+
+def allConditions(rules: Seq[UserLabelRule]): Seq[PostLabelCountCondition] = {
+  rules.foldLeft(Seq.empty[PostLabelCountCondition]) { (ruleConditions, rule) =>
+    rule.condition.anyOf.foldLeft(ruleConditions) { (anyOfConditions, anyOf) =>
+      anyOfConditions ++ anyOf.allOf
+    }
+  }
+}
+
+def maxWindowSize(rules: Seq[UserLabelRule]): Int = {
+  allConditions(rules)
+    .map { condition => condition.windowSize }
+    .filter { windowSize => windowSize > 0 }
+    .sortBy { windowSize => -windowSize }
+    .headOption
+    .getOrElse(0)
+}
+
+def maxScanSize(rules: Seq[UserLabelRule]): Int = {
+  allConditions(rules)
+    .map { condition =>
+      if (isMediaOnly(condition)) {
+        condition.windowSize * mediaOnlyScanMultiplier
+      } else {
+        condition.windowSize
+      }
+    }
+    .filter { scanSize => scanSize > 0 }
+    .sortBy { scanSize => -scanSize }
+    .headOption
+    .getOrElse(0)
+}
+
+def needsMediaLookup(rules: Seq[UserLabelRule]): Boolean = {
+  allConditions(rules).exists { condition => isMediaOnly(condition) }
+}
+
+def parseSafetyLabels(labels: Seq[String]): Seq[SafetyLabelType] = {
+  labels.flatMap { label => safetyLabelFromConfig(label) }
+}
+
+def isKnownUserLabel(label: String): Boolean = {
+  Thrift.enumArms[UserLabelValue].exists { value =>
+    labelsEqual(Thrift.labelOfEnum(value), label)
+  }
+}
+
+def isValidPostLabelSelector(selector: PostLabelSelector): Boolean = {
+  val configuredLabels = selector.anyOf ++ selector.allOf
+  configuredLabels.nonEmpty &&
+    selector.anyOf.distinct.size == selector.anyOf.size &&
+    selector.allOf.distinct.size == selector.allOf.size &&
+    parseSafetyLabels(configuredLabels).size == configuredLabels.size
+}
+
+def isValidPostLabelCount(condition: PostLabelCountCondition): Boolean = {
+  condition.windowSize > 0 &&
+    condition.windowSize <= maxConfiguredWindowSize &&
+    condition.minimumMatchingPosts > 0 &&
+    condition.minimumMatchingPosts <= maxConfiguredMinimumMatchingPosts &&
+    condition.maxPostAgeDays > 0 &&
+    condition.maxPostAgeDays <= maxConfiguredPostAgeDays &&
+    isValidPostLabelSelector(condition.postLabels)
+}
+
+def isValidRule(rule: UserLabelRule): Boolean = {
+  val triggerLabelsAreValid =
+    rule.triggerPostLabels.nonEmpty &&
+      rule.triggerPostLabels.distinct.size == rule.triggerPostLabels.size &&
+      parseSafetyLabels(rule.triggerPostLabels).size == rule.triggerPostLabels.size
+  val conditionGroupsAreValid =
+    rule.condition.anyOf.nonEmpty &&
+      rule.condition.anyOf.size <= maxConditionGroups &&
+      rule.condition.anyOf.filter { group =>
+        group.allOf.nonEmpty &&
+          group.allOf.size <= maxConditionsPerGroup &&
+          group.allOf.filter { condition => isValidPostLabelCount(condition) }.size == group.allOf.size
+      }.size == rule.condition.anyOf.size
+  val exclusionsAreValid =
+    rule.exclusions.highPageRankOrGreyBadge.nonEmpty &&
+      rule.exclusions.userLabels.distinct.size == rule.exclusions.userLabels.size &&
+      rule.exclusions.userLabels.filter { label => isKnownUserLabel(label) }.size == rule.exclusions.userLabels.size
+
+  rule.id.nonEmpty &&
+    triggerLabelsAreValid &&
+    rule.maxTriggerPostAgeDays > 0 &&
+    rule.maxTriggerPostAgeDays <= maxConfiguredPostAgeDays &&
+    conditionGroupsAreValid &&
+    userLabelFromConfig(rule.applyUserLabel).nonEmpty &&
+    rule.userLabelTtlDays > 0 &&
+    rule.userLabelTtlDays <= maxConfiguredUserLabelTtlDays &&
+    exclusionsAreValid
+}
+
+def validRules(rules: Seq[UserLabelRule]): Seq[UserLabelRule] = {
+  val valid = rules.filter { rule => isValidRule(rule) }
+  if (
+    rules.nonEmpty &&
+    rules.size <= maxConfiguredRules &&
+    rules.map { rule => rule.id }.distinct.size == rules.size &&
+    valid.size == rules.size
+  ) {
+    valid
+  } else {
+    Seq.empty
+  }
+}
+
+def matchesPostLabelSelector(
+  postLabels: Set[SafetyLabelType],
+  selector: PostLabelSelector
+): Boolean = {
+  val anyOfLabels = parseSafetyLabels(selector.anyOf)
+  val allOfLabels = parseSafetyLabels(selector.allOf)
+  val validAnyOf = anyOfLabels.size == selector.anyOf.size
+  val validAllOf = allOfLabels.size == selector.allOf.size
+  val hasConfiguredLabels = selector.anyOf.nonEmpty || selector.allOf.nonEmpty
+  val matchesAnyOf = selector.anyOf.isEmpty || postLabels.intersect(anyOfLabels.toSet).nonEmpty
+  val matchesAllOf = allOfLabels.filter { label => postLabels.contains(label) }.size == allOfLabels.size
+
+  hasConfiguredLabels && validAnyOf && validAllOf && matchesAnyOf && matchesAllOf
+}
+
+def matchesPostLabelCount(
+  condition: PostLabelCountCondition,
+  posts: Seq[PostLabelData]
+): Boolean = {
+  val windowPosts = if (isMediaOnly(condition)) {
+    posts.filter { post => post.hasMedia }
+  } else {
+    posts
+  }
+  condition.windowSize > 0 &&
+    condition.minimumMatchingPosts > 0 &&
+    windowPosts
+      .take(condition.windowSize)
+      .filter { post =>
+        isRecentPost(post.tweetId, condition.maxPostAgeDays) &&
+          matchesPostLabelSelector(post.labels, condition.postLabels)
+      }
+      .size >= condition.minimumMatchingPosts
+}
+
+def matchesRule(rule: UserLabelRule, posts: Seq[PostLabelData]): Boolean = {
+  rule.condition.anyOf.nonEmpty &&
+    rule.condition.anyOf.exists { anyOf =>
+      anyOf.allOf.nonEmpty &&
+        anyOf.allOf.filter { condition => matchesPostLabelCount(condition, posts) }.size == anyOf.allOf.size
+    }
+}
+
+def matchingOutputs(
+  rules: Seq[UserLabelRule],
+  posts: Seq[PostLabelData]
+): Seq[UserLabelOutput] = {
+  val matchingRules = rules.filter { rule => matchesRule(rule, posts) }
+  val resolvedOutputs = matchingRules.flatMap { rule =>
+    userLabelFromConfig(rule.applyUserLabel).map { labelValue =>
+      (labelValue, rule.userLabelTtlDays)
+    }
+  }
+  resolvedOutputs
+    .map { case (labelValue, _) => labelValue }
+    .distinct
+    .map { labelValue =>
+      val ttlDays = resolvedOutputs
+        .filter { case (outputLabel, _) => outputLabel == labelValue }
+        .map { case (_, days) => days }
+        .sortBy { days => -days }
+        .headOption
+        .getOrElse(0)
+      {
+        labelValue = labelValue,
+        ttlDays = ttlDays
+      }
+    }
+}
+
+def evaluateForTest(
+  rawConfig: String,
+  eventLabel: String,
+  nsfwUser: Boolean,
+  nsfwAdmin: Boolean,
+  highPageRankOrGreyBadge: Boolean,
+  userLabels: Set[String],
+  postLabels: Seq[(Set[String], Boolean)]
+): Seq[String] = {
+  val config = parseConfig(rawConfig)
+  val rules = triggeredRules(validRules(config.rules), eventLabel, 0L)
+  val user = {
+    nsfwUser = nsfwUser,
+    nsfwAdmin = nsfwAdmin,
+    highPageRankOrGreyBadge = highPageRankOrGreyBadge,
+    userLabels = userLabels
+  }
+  val eligibleRules = rules.filter { rule => !isExcluded(rule, user) }
+  val posts = postLabels.map { case (labels, hasMedia) =>
+    {
+      tweetId = 0L,
+      labels = parseSafetyLabels(labels.toSeq).toSet,
+      hasMedia = hasMedia
+    }
+  }
+  matchingOutputs(eligibleRules, posts).map { output => Thrift.labelOfEnum(output.labelValue) }
+}
+
+def maxScanSizeForTest(rawConfig: String): Int = {
+  maxScanSize(validRules(parseConfig(rawConfig).rules))
+}
+
+val safetyUnderstandingFSColumn = #<safety_understanding/featureswitches/featureSwitches>
+val fs = featureswitches.build({
+  getParamValue = { case (paramName, recipient) =>
+    safetyUnderstandingFSColumn.fetch(paramName, recipient).v
+  }
+})
+
+val defaultRulesJson =
+  """{
+    "rules": [
+      {
+        "id": "possibly_nsfw_account",
+        "enabled": true,
+        "triggerPostLabels": ["NSFW_HIGH_PRECISION", "SOFT_NSFW"],
+        "maxTriggerPostAgeDays": 60,
+        "condition": {
+          "anyOf": [
+            {
+              "allOf": [
+                {
+                  "windowSize": 10,
+                  "minimumMatchingPosts": 11,
+                  "maxPostAgeDays": 60,
+                  "mediaOnly": false,
+                  "postLabels": {
+                    "anyOf": ["NSFW_HIGH_PRECISION", "SOFT_NSFW"],
+                    "allOf": []
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "applyUserLabel": "POSSIBLY_NSFW_ACCOUNT",
+        "userLabelTtlDays": 7,
+        "exclusions": {
+          "nsfwUser": true,
+          "nsfwAdmin": true,
+          "highPageRankOrGreyBadge": true,
+          "userLabels": ["NSFW_HIGH_PRECISION", "POSSIBLY_NSFW_ACCOUNT"]
+        }
+      },
+      {
+        "id": "nsfw_high_precision",
+        "enabled": true,
+        "triggerPostLabels": ["NSFW_HIGH_PRECISION"],
+        "maxTriggerPostAgeDays": 60,
+        "condition": {
+          "anyOf": [
+            {
+              "allOf": [
+                {
+                  "windowSize": 5,
+                  "minimumMatchingPosts": 3,
+                  "maxPostAgeDays": 60,
+                  "mediaOnly": false,
+                  "postLabels": {
+                    "anyOf": ["NSFW_HIGH_PRECISION"],
+                    "allOf": []
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        "applyUserLabel": "NSFW_HIGH_PRECISION",
+        "userLabelTtlDays": 7,
+        "exclusions": {
+          "nsfwUser": false,
+          "nsfwAdmin": true,
+          "highPageRankOrGreyBadge": false,
+          "userLabels": ["NSFW_HIGH_PRECISION"]
+        }
+      }
+    ]
+  }"""
+
+val configuredRulesJson = fs.stringParam(
+  "safety_understanding_post_to_user_label_rules",
+  defaultRulesJson)
+
+val export = {
+  parseConfig = parseConfig,
+  triggeredRules = triggeredRules,
+  isExcluded = isExcluded,
+  maxWindowSize = maxWindowSize,
+  maxScanSize = maxScanSize,
+  needsMediaLookup = needsMediaLookup,
+  matchingOutputs = matchingOutputs,
+  validRules = validRules,
+  evaluateForTest = evaluateForTest,
+  maxScanSizeForTest = maxScanSizeForTest,
+  defaultRulesJson = defaultRulesJson,
+  configuredRulesJson = configuredRulesJson,
+}
+
+val contactInfo = {
+  contactEmail = "core-product@twitter.com",
+  ldapGroup = "recos-platform-team",
+}
+
+Library({
+  export = export,
+  description = PlainText("Evaluates config-driven post label conditions for user label aggregation"),
+  contactInfo = contactInfo,
+  lifecycle = Production
+})

@@ -1,0 +1,18 @@
+junit_tests(
+    compiler_option_sets = ["fatal_warnings"],
+    dependencies = [
+        "3rdparty/jvm/org/scalatestplus:junit",
+        "media-understanding/common:livetest",
+        "media-understanding/common:test-deps",
+        "media-understanding/common/src/main/scala/com/twitter/media_understanding/common/modules",
+        "media-understanding/common/src/test/scala/com/twitter/media_understanding/common/integrationtest",
+        "media-understanding/media-model-proxy/integrationtest/src/test/resources/com/twitter/media_understanding/model_proxy/integrationtest:files",
+    ],
+    extra_jvm_options = [
+        "-Djava.security.manager",
+        "-Djava.security.policy=livetest/src/main/jvm/allow-all.policy",
+    ],
+    runtime_platform = "java11",
+    sources = ["*.scala"],
+    tags = ["bazel-compatible"],
+)

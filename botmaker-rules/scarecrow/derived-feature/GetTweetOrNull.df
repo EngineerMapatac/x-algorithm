@@ -1,0 +1,6 @@
+description:\nexpression: |
+  params(Long :tweetId) {
+    TryOrElse(GetTweet(:tweetId), (com.twitter.tweetypie.thriftjava.Tweet)NULL)
+  }
+logged: 'false'
+returnType: Auto

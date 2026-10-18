@@ -1,0 +1,31 @@
+id: '24493'
+description:\nevent: media_update
+condition: |
+  Exists(category) &&
+  Exists(entityId) &&
+  category == "GROK_GENERATED_IMAGE" &&
+  IsHighPrecisionNsfw
+action: |
+  {
+    val :event_thrift = ToThrift("com.twitter.mediaservices.commons.media_update.thrift_java.MediaUpdate", eventThrift);
+    val :grok_share_ids = GetGrokShareIdsFromGrokMediaId(entityId);
+    Log("grok_share_ids", :grok_share_ids);
+    if (IsNearPerfectNsfw) {
+      SetLabelWithTtl(
+        "GrokMediaNsfwDetection",
+        entityId,
+        "NearPerfectNsfw",
+        OneDayInSecs * 75
+      );
+    } else if (IsHighPrecisionNsfw) {
+      SetLabelWithTtl(
+        "GrokMediaNsfwDetection",
+        entityId,
+        "HighPrecisionNsfw",
+        OneDayInSecs * 75
+      );
+    }
+  }
+expiry: '2029-10-18T21:18:09.279Z'
+isActive: 'true'
+owner:\nactionLimits: {}

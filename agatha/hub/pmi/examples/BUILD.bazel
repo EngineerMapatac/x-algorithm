@@ -1,0 +1,33 @@
+scala_library(
+    name = "examples",
+    dependencies = [
+        "3rdparty/src/jvm/com/twitter/scalding:core",
+        "graphstore/common:flock_follows-java",
+        "hub/pmi/src/main/scala/com/twitter/hub/pmi",
+        "src/scala/com/twitter/scalding_internal/dalv2",
+        "src/scala/com/twitter/scalding_internal/dalv2/dataset",
+        "src/scala/com/twitter/scalding_internal/job",
+        "src/scala/com/twitter/scalding_internal/job/analytics_batch",
+        "src/scala/com/twitter/scalding_internal/source",
+        "src/scala/com/twitter/wtf/scalding/jobs/common",
+        "usersource/snapshot/src/main/scala/com/twitter/usersource/snapshot/combined:usersource-scala",
+    ],
+    platform = "java8",
+    sources = ["*.scala"],
+    tags = ["bazel-only"],
+)
+
+hadoop_binary(
+    name = "adhoc-scalding",
+    dependencies = [
+        ":examples",
+    ],
+    main = "com.twitter.scalding.Tool",
+    platform = "java8",
+    runtime_platform = "java11",
+    tags = [
+        "bazel-compatible",
+        "bazel-compatible:migrated",
+        "bazel-only",
+    ],
+)

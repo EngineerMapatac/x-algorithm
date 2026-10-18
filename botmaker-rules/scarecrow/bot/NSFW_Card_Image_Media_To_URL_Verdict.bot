@@ -1,0 +1,33 @@
+id: '7429'
+description:\nevent: media_update
+condition: |
+  Exists(category) &&
+  Exists(entityId) &&
+  category == "CARD_IMAGE" &&
+  IsNearPerfectNsfw
+action: |
+  {
+    val :cardUrlLastHop = entityId;
+    val :lastHopVerdict = GetUrlVerdictV2(:cardUrlLastHop);
+    val :verdict = DictGetOrElse(:lastHopVerdict, "verdict", "UNKNOWN");
+    if(IsNearPerfectNsfw &&
+      :verdict != "NSFW_CARD_IMAGE" &&
+      :verdict != "BAD"
+    ) {
+      WriteUrlVerdictsV2(Set(:cardUrlLastHop), "NSFW_CARD_IMAGE", 86400 * 7, "EXACT_URL_MATCH","updating reputation store","botmaker", "bot_7429");
+      Log("nsfw_card_url_log", :cardUrlLastHop);
+      IncrementStat("URLs_added_as_NSFW_CARD_IMAGE_in_Rep_Store", 1);
+    }  else if(:verdict == "NSFW_CARD_IMAGE" &&
+      !IsHighRecallNsfw &&
+      !IsHighPrecisionNsfw
+    ) {
+      val :verdictCreationTime = DictGetOrElse(:lastHopVerdict, "creationTimestampInSec", 0);
+      if(:verdictCreationTime - (CurrentTimeMs()/1000) > (60 * 60 * 1000)) {
+        DeleteUrlVerdictIf(:cardUrlLastHop, "EXACT_URL_MATCH", "NSFW_CARD_IMAGE", Join("_", "bot", RULE_ID), "botmaker");
+        IncrementStat("URLs_removed_as_NSFW_CARD_IMAGE_in_Rep_Store", 1);
+      };
+    };
+  }
+expiry: +292278994-08-17T07:12:55.807Z
+isActive: 'true'
+owner:\nactionLimits: {}

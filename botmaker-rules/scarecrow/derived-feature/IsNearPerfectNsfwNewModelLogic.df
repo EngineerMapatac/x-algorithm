@@ -1,0 +1,7 @@
+description:\nexpression: |
+  {
+    val :nsfwNearPerfectNewModelThreshold = 0.999;
+    Exists(precisionNewNsfw) && precisionNewNsfw >= :nsfwNearPerfectNewModelThreshold;
+  }
+logged: 'false'
+returnType: BooleanValue

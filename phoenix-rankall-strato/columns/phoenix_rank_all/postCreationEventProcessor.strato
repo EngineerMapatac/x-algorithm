@@ -1,0 +1,29 @@
+import <hydra/sharedConfig>
+
+type Event = com.twitter.strato.columns.content_understanding.content_understanding.ContentUnderstandingMetadataV2
+
+val processor = #<hydra/phoenix_rank_all/phoenixRankAllCandidateProcessor>
+
+val executeOp = Op.execute({ idempotent = true })[(Long, Event), Unit] { ctx =>
+  val (postId, _) = ctx.arg
+  val request = {
+    postId = postId,
+    eventSource = PostCreation
+  }
+  processor.execute(request)
+  Ok
+}
+
+val accessPolicy = AllowAll
+
+Managed({
+  source = QueryColumn({ ops = Map(Execute -> executeOp) }),
+  contactInfo = Some(sharedConfig.contactInfo),
+  lifecycle = Production,
+  description = PlainText(
+    """
+      Receives post creation event, constructs PhoenixRankAllIndexingRequest, and calls phoenixRankAllCandidateProcessor.
+    """
+  ),
+  accessPolicy = accessPolicy
+})

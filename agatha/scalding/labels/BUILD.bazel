@@ -1,0 +1,43 @@
+scala_library(
+    name = "label_extraction_template",
+    dependencies = [
+        "3rdparty/src/jvm/com/twitter/scalding:core",
+        "hub/agatha/src/main/thrift/com/twitter/hub/agatha:agatha-scala",
+        "src/scala/com/twitter/mediascience/scalding/extensions",
+        "src/scala/com/twitter/scalding_internal/job",
+        "src/scala/com/twitter/scalding_internal/job/analytics_batch",
+    ],
+    platform = "java8",
+    sources = ["LabelExtractionTemplate.scala"],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)
+
+scala_library(
+    name = "label_util",
+    dependencies = [
+        "3rdparty/src/jvm/com/twitter/scalding:core",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/util",
+        "hub/agatha/src/main/thrift/com/twitter/hub/agatha:agatha-scala",
+    ],
+    platform = "java8",
+    sources = ["LabelUtil.scala"],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)
+
+scala_library(
+    name = "agatha_label_manager",
+    dependencies = [
+        "agatha/src/main/scala/com/twitter/agatha/scalding/labels/blocks_per_fav",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/labels/nsfw",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/labels/reports_per_fav",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/labels/spam_reports_per_fav",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/labels/spam_suspended",
+        "hub/agatha/src/main/scala/com/twitter/hub/agatha/labels",
+    ],
+    platform = "java8",
+    sources = ["AgathaLabelManager.scala"],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)

@@ -1,0 +1,4 @@
+description:\nexpression: |
+  SetIntersection(Set("a"), Set("b"))
+logged: 'false'
+returnType: StrSetValue

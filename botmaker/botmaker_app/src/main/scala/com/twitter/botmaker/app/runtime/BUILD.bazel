@@ -1,0 +1,17 @@
+scala_library(
+    name = "runtime",
+    compiler_option_sets = ["fatal_warnings"],
+    dependencies = [
+        "botmaker/botmaker_eventbus/src/main/scala/com/twitter/botmaker",
+        "botmaker/botmaker_http/src/main/scala/com/twitter/botmaker",
+        "botmaker/botmaker_manhattan/src/main/scala/com/twitter/botmaker",
+        "botmaker/botmaker_memcached/src/main/scala/com/twitter/botmaker",
+        "botmaker/botmaker_thrift/src/main/scala/com/twitter/botmaker",
+        "botmaker/src/java/com/twitter/botmaker",
+        "botmaker/src/scala/com/twitter/botmaker",
+        "botmaker/src/thrift/com/twitter/botmaker/runtime:runtime-java",
+    ],
+    platform = "java8",
+    sources = ["*.scala"],
+    tags = ["bazel-compatible"],
+)

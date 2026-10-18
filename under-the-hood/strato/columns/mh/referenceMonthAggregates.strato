@@ -1,0 +1,43 @@
+import <visibility/under-the-hood/sharedConfig>
+
+type Key = Int
+type Value = com.twitter.visibility.under_the_hood.UthReferenceMonthAggregate
+
+Managed({
+  source = ManhattanColumn({
+    dest = sharedConfig.mhUnderTheHoodConfig.dest,
+    appId = sharedConfig.mhUnderTheHoodConfig.appId,
+    dataset = sharedConfig.mhUnderTheHoodConfig.reference_month_dataset,
+    mapping = ReadOnly({
+      key = Type(Key),
+      value = Type(Value),
+      keyEncoding = ManhattanClientBijectionsEncoding,
+      valueEncoding = ThriftEncoding({ encodingType = ThriftBinaryEncoding }),
+    }),
+  }),
+  contactInfo = Some(sharedConfig.contactInfo),
+  lifecycle = Production,
+  accessPolicy = AnyOf({
+    policies = Seq(
+      FromColumns(Set(
+        Path("visibility/under-the-hood/underTheHoodReport.User"),
+        Path("visibility/under-the-hood/underTheHoodReport"),
+      )),
+      Has({ principal = LdapGroup({ id = "visibility-admins" }) }),
+      Has({ principal = LdapGroup({ id = "birdwatch-admins" }) }),
+      Has({ principal = LdapGroup({ id = "birdwatch-team" }) }),
+      Has({ principal = LdapGroup({ id = "platform-manipulation-admins" }) }),
+      ServiceIdentifierPattern({
+        role = "stratostore",
+        service = "stratoapi",
+        env = "*",
+        zone = Seq("all"),
+      }),
+    )
+  }),
+  description = PlainText(
+    "Under the Hood reference-month aggregates MH-RO. " +
+      "Key = monthBucket (yyyymm). Value = UthReferenceMonthAggregate. " +
+      "Written by uth_reference_month_mh_publisher (VersionedKeyVal dual-write)."
+  ),
+})

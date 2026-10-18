@@ -1,0 +1,34 @@
+description:\nexpression: |
+  params(Long :tweetId)
+  {
+    # Bail on dud tweet ids
+    if (:tweetId == -1) {
+      ToDict();
+    } else {
+      val :card = GetTweet(:tweetId).card2;
+      # No tweet card
+      if (:card == NULL) {
+        ToDict();
+      } else {
+        val :topLevel = ToDict(
+          "url", :card.url,
+          "name", :card.name
+        );
+        val :bindingValues = :card.binding_values;
+        val :valueMap = Foldl(
+          :map,
+          :bindingValue,
+          if (:bindingValue.type == "STRING") {
+            DictMerge(:map, ToDict(:bindingValue.key, :bindingValue.string_value))
+          } else {
+            :map
+          },
+          ToDict(),
+          :bindingValues
+        );
+        DictMerge(:topLevel, :valueMap)
+      }
+    }
+  }
+logged: 'false'
+returnType: StrValue

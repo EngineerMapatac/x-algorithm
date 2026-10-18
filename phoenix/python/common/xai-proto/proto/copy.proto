@@ -1,0 +1,19 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 X.AI Corp.
+syntax = "proto3";
+
+package copy;
+
+service Copy {
+  rpc Register(RegisterRequest) returns (RegisterResponse) {}
+}
+
+message RegisterRequest {
+  string path = 1;
+
+  string name = 2;
+
+  bytes rdma_device_indexes = 3;
+}
+
+message RegisterResponse {}

@@ -1,0 +1,4 @@
+description:\nexpression: |
+  Substring(GetShardHostName(),0, 4)
+logged: 'false'
+returnType: StrValue

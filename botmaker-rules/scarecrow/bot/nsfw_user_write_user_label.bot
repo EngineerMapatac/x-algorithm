@@ -1,0 +1,14 @@
+id: '22358'
+description:\nevent: health_side_effect
+condition: |
+  healthSideEffectSubEvent == "nsfw_user" &&
+  GetUser(userId) != NULL &&
+  !IsTestUser(userId)
+action: |
+  {
+    ApplyNsfwUserLabelOrCreateReport(userId, "NSFW_HIGH_PRECISION", Concat("By bot/", ToString(RULE_ID)));
+    ApplyNsfwUserLabelOrCreateReport(userId, "NSFW_HIGH_RECALL", Concat("By bot/", ToString(RULE_ID)));
+  }
+expiry: '2031-07-31T16:37:35.583Z'
+isActive: 'true'
+owner:\nactionLimits: {}

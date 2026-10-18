@@ -1,0 +1,23 @@
+scala_library(
+    name = "botmaker",
+    dependencies = [
+        "3rdparty/jvm/org/antlr:antlr-3.5",
+        "botmaker/src/java/com/twitter/botmaker",
+        "botmaker/src/thrift/com/twitter/botmaker/rule:rule-scala",
+        "botmaker/src/thrift/com/twitter/botmaker/runtime:runtime-java",
+        "decider/src/main/scala",
+        "finagle-internal/mtls/src/main/scala/com/twitter/finagle/mtls/authentication",
+        "scrooge/scrooge-serializer/src/main/scala",
+        "src/scala/com/twitter/botmaker/common",
+        "src/java/com/twitter/spam/botmaker_features",
+        "src/thrift/com/twitter/botmaker:botmaker-java",
+        "src/thrift/com/twitter/bouncer:bounce-action-thrift-java",
+        "src/thrift/com/twitter/service/scarecrow/gen:tiered-actions-java",
+        "src/thrift/com/twitter/service/scarecrow/gen:tiered-actions-scala",
+        "util/util-thrift/src/main/scala",
+        "util/util-app/src/main/scala",
+    ],
+    platform = "java8",
+    sources = ["**/*.scala"],
+    tags = ["bazel-compatible"],
+)

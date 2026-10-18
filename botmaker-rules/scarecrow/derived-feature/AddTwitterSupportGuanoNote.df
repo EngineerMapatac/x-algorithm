@@ -1,0 +1,33 @@
+description:\nexpression: |
+  params(Long :userId, String :note, Long :maxPerDay=1)
+  {
+    val :userIdStr = ToString(:userId);
+    val :guanoNoteNamespace = Concat(ToString(RULE_ID), "~", "guano_note_namespace");
+    val :key = Concat(ToString(RULE_ID), "~", :userIdStr);
+    val :numGuanoNotesLeft = TryOrElse(
+      GetFeatureCountLite(
+        :guanoNoteNamespace,
+        :key,
+        86400,
+        FALSE,
+        TRUE
+      ),
+      :maxPerDay
+    );
+    # Leaves no more than the maxPerDay number of guano note per RULE~USER combination.
+    # NOTE: If a user hits multiple rules we will send one guano note for each.
+    if (:numGuanoNotesLeft < :maxPerDay) {
+      IncrementFeatureCountLite(
+        :guanoNoteNamespace,
+        :key,
+        1
+      );
+      AddGuanoNote(
+        :userId,
+        95731075,
+        :note
+      );
+    };
+  }
+logged: 'false'
+returnType: StrValue

@@ -1,14 +1,32 @@
+pub mod ads;
 mod candidate_hydrators;
-mod candidate_pipeline;
-pub mod clients; // Excluded from open source release for security reasons
+pub mod candidate_pipeline;
+pub mod clients;
+pub mod config;
+pub mod dark_traffic_setup;
 mod filters;
-pub mod params; // Excluded from open source release for security reasons
+mod following_feed_server;
+mod for_you_server;
+pub mod frames;
+pub mod models;
+pub mod params;
+mod phoenix_scores_server;
+pub mod popular_authors_job;
+pub mod popular_posts_job;
 mod query_hydrators;
+mod ranked_following_feed_server;
+mod scored_posts_server;
 pub mod scorers;
 mod selectors;
-mod server;
+pub mod server;
 mod side_effects;
 mod sources;
-pub mod util; // Excluded from open source release for security reasons
+pub mod util;
 
-pub use server::HomeMixerServer;
+pub use candidate_pipeline::{PhoenixXdsConfig, VmRankerXdsConfig};
+pub use following_feed_server::FollowingFeedServer;
+pub use for_you_server::ForYouFeedServer;
+pub use phoenix_scores_server::PhoenixScoresServer;
+pub use ranked_following_feed_server::RankedFollowingFeedServer;
+pub use scored_posts_server::ScoredPostsServer;
+pub use server::{HomeMixerConfig, HomeMixerServer};

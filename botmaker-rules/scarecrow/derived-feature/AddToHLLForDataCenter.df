@@ -1,0 +1,12 @@
+description:\nexpression: |
+  param(String :namespace, String :topic, String :id, String :value, Long :precisionSecs, Long :ttlHours, Long :sliceNumber, Long :zeroOrTimestampMs)
+
+  {
+    val :dc = GetDataCenterName;
+    val :ns = Join(".", :dc, :namespace);
+
+    AddToHLL(:ns, :topic, :id, :value, :zeroOrTimestampMs, :precisionSecs, :ttlHours, :sliceNumber);
+    TRUE
+  }
+logged: 'false'
+returnType: BooleanValue

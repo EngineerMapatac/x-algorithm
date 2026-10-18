@@ -1,0 +1,23 @@
+import <hydra/sharedConfig>
+
+type StreamingEventLog = com.twitter.strato.columns.hydra.StreamingEventLog
+
+val scribeColumn = ScribeColumn({
+  category = "hydra_streaming_event_logs",
+  logType = Type(StreamingEventLog)
+})
+
+val accessPolicy = AnyOf(Seq(
+  FromColumns(Set(
+    Path("hydra/favoriteEventProcessor")
+  )),
+  sharedConfig.adminPolicy
+))
+
+Managed({
+  description = PlainText({ "For scribing fav events" }),
+  source = scribeColumn,
+  lifecycle = Production,
+  accessPolicy = accessPolicy,
+  contactInfo = Some(sharedConfig.contactInfo),
+})

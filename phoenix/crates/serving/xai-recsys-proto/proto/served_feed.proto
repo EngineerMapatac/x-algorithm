@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 X.AI Corp.
+syntax = "proto3";
+
+package xai.recsys.v1;
+
+import "recsys.proto";
+
+message ServedFeedEntry {
+  uint64 tweet_id = 1;
+  uint64 author_id = 2;
+  int32 position = 3;
+  bool promoted = 4;
+}
+
+message ServedFeed {
+  uint64 prediction_request_id = 1;
+  uint64 user_id = 2;
+  int64 served_time_ms = 3;
+  ProductSurface product_surface = 4;
+  repeated ServedFeedEntry entries = 5;
+  int32 page_index = 6;
+}

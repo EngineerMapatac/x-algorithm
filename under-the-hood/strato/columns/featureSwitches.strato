@@ -1,0 +1,9 @@
+import <visibility/under-the-hood/sharedConfig>
+
+Managed({
+  source = FeatureSwitchesColumn({ directory = "features/visibility/main" }),
+  accessPolicy = AllowAll,
+  description = PlainText("FeatureSwitches for Under the Hood Strato columns."),
+  contactInfo = Some(sharedConfig.contactInfo),
+  lifecycle = Production,
+})

@@ -1,0 +1,111 @@
+<configuration>
+  <shutdownHook class="ch.qos.logback.core.hook.DelayingShutdownHook"/>
+
+  <property name="DEFAULT_SERVICE_PATTERN"
+            value="%-25thread %-25logger{0} %-8X{traceId:--} %-14X{clientId:--} %msg"/>
+
+  <property name="DEFAULT_ACCESS_PATTERN"
+            value="%msg %X{clientAddress:--} %X{transactionId:--} %X{userId:--} %X{appId:--}"/>
+
+
+  <contextListener class="ch.qos.logback.classic.jul.LevelChangePropagator">
+    <resetJUL>true</resetJUL>
+  </contextListener>
+
+  <appender name="SERVICE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+    <file>${log.service.output}</file>
+    <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+      <fileNamePattern>${log.service.output}-%d{yyyy-MM-dd}.%i</fileNamePattern>
+      <timeBasedFileNamingAndTriggeringPolicy
+          class="ch.qos.logback.core.rolling.SizeAndTimeBasedFNATP">
+        <maxFileSize>50MB</maxFileSize>
+      </timeBasedFileNamingAndTriggeringPolicy>
+    </rollingPolicy>
+    <encoder>
+      <pattern>%date %.-3level ${DEFAULT_SERVICE_PATTERN}%n</pattern>
+    </encoder>
+  </appender>
+
+  <appender name="ACCESS" class="ch.qos.logback.core.rolling.RollingFileAppender">
+    <file>${log.access.output}</file>
+    <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+      <fileNamePattern>${log.access.output}-%d{yyyy-MM-dd}.%i</fileNamePattern>
+      <timeBasedFileNamingAndTriggeringPolicy
+          class="ch.qos.logback.core.rolling.SizeAndTimeBasedFNATP">
+        <maxFileSize>50MB</maxFileSize>
+      </timeBasedFileNamingAndTriggeringPolicy>
+    </rollingPolicy>
+    <encoder>
+      <pattern>${DEFAULT_ACCESS_PATTERN}%n</pattern>
+    </encoder>
+  </appender>
+
+  <appender name="LOGLENS" class="com.twitter.loglens.logback.LoglensAppender">
+    <mdcAdditionalContext>true</mdcAdditionalContext>
+    <category>${log.lens.category}</category>
+    <index>${log.lens.index}</index>
+    <tag>${log.lens.tag}/service</tag>
+    <encoder>
+      <pattern>%msg</pattern>
+    </encoder>
+  </appender>
+
+  <appender name="LOGLENS-ACCESS" class="com.twitter.loglens.logback.LoglensAppender">
+    <mdcAdditionalContext>true</mdcAdditionalContext>
+    <category>${log.lens.category}</category>
+    <index>${log.lens.index}</index>
+    <tag>${log.lens.tag}/access</tag>
+    <encoder>
+      <pattern>%msg</pattern>
+    </encoder>
+  </appender>
+
+
+  <property name="async_queue_size" value="${queue.size:-50000}"/>
+  <property name="async_max_flush_time" value="${max.flush.time:-0}"/>
+
+  <appender name="ASYNC-SERVICE" class="ch.qos.logback.classic.AsyncAppender">
+    <queueSize>${async_queue_size}</queueSize>
+    <maxFlushTime>${async_max_flush_time}</maxFlushTime>
+    <appender-ref ref="SERVICE"/>
+  </appender>
+
+  <appender name="ASYNC-ACCESS" class="ch.qos.logback.classic.AsyncAppender">
+    <queueSize>${async_queue_size}</queueSize>
+    <maxFlushTime>${async_max_flush_time}</maxFlushTime>
+    <appender-ref ref="ACCESS"/>
+  </appender>
+
+  <appender name="ASYNC-LOGLENS" class="ch.qos.logback.classic.AsyncAppender">
+    <queueSize>${async_queue_size}</queueSize>
+    <maxFlushTime>${async_max_flush_time}</maxFlushTime>
+    <appender-ref ref="LOGLENS"/>
+  </appender>
+
+  <appender name="ASYNC-LOGLENS-ACCESS" class="ch.qos.logback.classic.AsyncAppender">
+    <queueSize>${async_queue_size}</queueSize>
+    <maxFlushTime>${async_max_flush_time}</maxFlushTime>
+    <appender-ref ref="LOGLENS-ACCESS"/>
+  </appender>
+
+
+  <logger name="com.twitter" level="info"/>
+  <logger name="com.twitter.wilyns" level="warn"/>
+  <logger name="com.twitter.finagle.mux" level="warn"/>
+  <logger name="com.twitter.finagle.serverset2" level="warn"/>
+  <logger name="com.twitter.logging.ScribeHandler" level="warn"/>
+  <logger name="com.twitter.zookeeper.client.internal" level="warn"/>
+
+  <root level="${log_level:-INFO}">
+    <appender-ref ref="ASYNC-SERVICE"/>
+    <appender-ref ref="ASYNC-LOGLENS"/>
+  </root>
+
+  <logger name="com.twitter.finatra.http.filters.AccessLoggingFilter"
+          level="info"
+          additivity="false">
+    <appender-ref ref="ASYNC-ACCESS"/>
+    <appender-ref ref="ASYNC-LOGLENS-ACCESS"/>
+  </logger>
+
+</configuration>

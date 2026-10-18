@@ -1,0 +1,62 @@
+id: '21599'
+description:\nevent: bqbm_scheduled_queries
+condition: |
+  Exists(entityId) &&
+  Exists(jobName) &&
+  Exists(notes) &&
+  (
+    jobName == "bbq_duplicate_text_unigrams_replies" ||
+    jobName == "bbq_duplicate_text_characters_replies_cjk"
+  ) &&
+  entityType == "tweetIdCluster"
+action: |
+  {
+    val :prodJobName = Concat(jobName, "_prod");
+    val :eligibleTweets = Filter(
+      :tweetId,
+      {
+        !HasBigQuerytoBotmakerLabel(:prodJobName, ToString(:tweetId)) &&
+        !Contains(GetTweetRtfLabels(:tweetId), "COPYPASTA_SPAM") &&
+        TryOrElse(GetTweet(:tweetId).card2.name != "promo_video_convo", FALSE) &&
+        TryOrElse(GetTweet(:tweetId).card2.name != "promo_image_convo", FALSE)
+      },
+      StringIdListToLongList(entityId)
+    );
+    val :actionableTweets = Filter(
+      :tweetId,
+      {
+        val :tweetAuthor = GetTweetAuthorId(:tweetId);
+        !IsTestUser(:tweetAuthor) &&
+        !IsHighPageRankUser(:tweetAuthor) &&
+        !Contains(GetLongList(`AutoExpiringTempSkipList`), :tweetAuthor) &&
+        !IsUserGrayVerified(:tweetAuthor)
+      },
+      :eligibleTweets
+    );
+    val :unactionableTweets = SetDiff(ToSet(:eligibleTweets), ToSet(:actionableTweets));
+    val :rateLimitThreshold = 1000 * 100;
+    val :rateLimitTimePeriod = OneMinuteInSecs;
+    val :downrankNote = Concat("go/bot/", ToString(RULE_ID), ": ", jobName, " tweet labeled COPYPASTA_SPAM");
+    if (Length(:actionableTweets) > 0) {
+      RateLimited(
+        {
+          for (:tweetId in :actionableTweets) {
+            TweetRtfApplyLabel("COPYPASTA_SPAM", :tweetId);
+            SetBigQuerytoBotmakerLabel(:prodJobName, ToString(:tweetId));
+          }
+        },
+        :rateLimitTimePeriod,
+        :rateLimitThreshold,
+        jobName,
+        {
+          Log("BBQDuplicateTextRepliesProd_rate_limited", :actionableTweets);
+        }
+      );
+    }
+    if (Length(:unactionableTweets) > 0) {
+      Log("BBQDuplicateTextRepliesProd_unactionable_tweets", :unactionableTweets);
+    }
+  }
+expiry: +292278994-08-17T07:12:55.807Z
+isActive: 'true'
+owner:\nactionLimits: {}

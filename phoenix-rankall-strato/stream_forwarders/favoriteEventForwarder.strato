@@ -1,0 +1,21 @@
+import <hydra/sharedConfig>
+
+StreamForwarder({
+  source = KafkaTopic({
+    topic = "timeline_events_prototype",
+    dest = "/s/kafka/main-2",
+    consumerGroupId = "hydra-favoriteEventForwarder-stratostreaming",
+    develConsumerGroupId = Some("hydra-favoriteEventForwarder-stratostreaming-devel"),
+    mapping = ValueOnly({
+      value = Type(com.twitter.timelineservice.Event),
+      encoding = ThriftEncoding
+    })
+  }),
+  forwardToOp = Execute,
+  forwardEventsFrom = AllZones,
+  forwardToColumn = #<hydra/favoriteEventProcessor>,
+  delay = 2.minutes,
+  slo = { maxLag = 120.minutes },
+  contactInfo = Some(sharedConfig.contactInfo),
+  lifecycle = Development
+})

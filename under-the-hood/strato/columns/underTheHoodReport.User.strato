@@ -1,0 +1,556 @@
+import <visibility/under-the-hood/sharedConfig>
+import <visibility/under-the-hood/underTheHoodLabels>
+import <visibility/under-the-hood/params>
+
+type Key = Long
+type View = Unit
+type Value = com.twitter.strato.graphql.UnderTheHoodReport
+
+type UthUserMonthAggregate = com.twitter.visibility.under_the_hood.UthUserMonthAggregate
+type UthDayCarriedRemoved = com.twitter.visibility.under_the_hood.UthDayCarriedRemoved
+type UthDayCount = com.twitter.visibility.under_the_hood.UthDayCount
+type UthUserMonthKey = com.twitter.visibility.under_the_hood.UthUserMonthKey
+type UthDaysIncluded = com.twitter.visibility.under_the_hood.UthDaysIncluded
+type User = com.twitter.gizmoduck.User
+type RichText = com.twitter.timelines.render.RichText
+
+val metadataUserId = -1L
+val minimumAccountAge = 365.days
+val minimumEligiblePosts = 10L
+val minDaysAfterMonthEnd = 10
+val postsCheckLabel = "10 or more posts in the prior month"
+val ageCheckLabel = "Account at least 1 year old"
+val englishMonthNames = Seq(
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+)
+type RichTextEntity = com.twitter.timelines.render.RichTextEntity
+type NoteSpan = {
+  text: String,
+  url: Option[String]
+}
+type NoteBuild = {
+  text: String,
+  entities: Seq[RichTextEntity]
+}
+
+val noteSpans: Seq[NoteSpan] = Seq(
+  {
+    text = "You can learn more about instances when a post’s reach may be limited by reading our ",
+    url = None : Option[String],
+  },
+  { text = "open-source code", url = Some("https://github.com/xai-org/x-algorithm") },
+  { text = " and ", url = None : Option[String] },
+  { text = "guide", url = Some("https://help.x.com/rules-and-policies/x-reach-limited") },
+  {
+    text = ". Learn more about account and post-level ",
+    url = None : Option[String],
+  },
+  { text = "enforcement options", url = Some("https://help.x.com/rules-and-policies/enforcement-options") },
+  {
+    text = ". This report is provided on a best-effort basis — the code that generates it is ",
+    url = None : Option[String],
+  },
+  { text = "open-source", url = Some("https://github.com/xai-org/x-algorithm/tree/main/under-the-hood") },
+)
+
+val reportNoteString = noteSpans.foldLeft("") { (acc, span) =>
+  span.url match {
+    case Some(url) => acc + span.text + " (" + url + ")"
+    case None => acc + span.text
+  }
+}
+
+def linkEntity(fromIndex: Int, linkText: String, url: String): RichTextEntity = {
+  fromIndex = fromIndex,
+  toIndex = fromIndex + linkText.length,
+  ref = Some(Url({
+    url = url,
+    urlType = ExternalUrl,
+  })),
+}
+
+def reportNote(): RichText = {
+  val built = noteSpans.foldLeft[NoteBuild]({ text = "", entities = Seq.empty[RichTextEntity] }) { (acc, span) =>
+    span.url match {
+      case Some(url) => {
+        text = acc.text + span.text,
+        entities = acc.entities ++ Seq(linkEntity(acc.text.length, span.text, url)),
+      }
+      case None => {
+        text = acc.text + span.text,
+        entities = acc.entities,
+      }
+    }
+  }
+  {
+    text = built.text,
+    entities = built.entities,
+  }
+}
+
+val utcYyyyMm = TimeFormat.apply("yyyyMM").withZone("UTC")
+val utcYyyyMmDd = TimeFormat.apply("yyyy-MM-dd").withZone("UTC")
+val utcIsoSeconds = TimeFormat.apply("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone("UTC")
+
+def pad2(n: Int): String =
+  if (n < 10) { "0" + n.toString } else { n.toString }
+
+def isLeapYear(year: Int): Boolean =
+  (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+
+def daysInMonth(year: Int, month: Int): Int = {
+  if (month == 2) {
+    if (isLeapYear(year)) { 29 } else { 28 }
+  } else if (month == 4 || month == 6 || month == 9 || month == 11) {
+    30
+  } else {
+    31
+  }
+}
+
+def monthBucketBefore(monthBucket: Int): Int = {
+  val year = monthBucket / 100
+  val month = monthBucket % 100
+  if (month == 1) {
+    (year - 1) * 100 + 12
+  } else {
+    year * 100 + (month - 1)
+  }
+}
+
+def calendarMonthBefore(now: Time.T): Int =
+  monthBucketBefore(utcYyyyMm.format(now).toInt)
+
+def periodStartDate(monthBucket: Int): String = {
+  val year = monthBucket / 100
+  val month = monthBucket % 100
+  year.toString + "-" + pad2(month) + "-01"
+}
+
+def periodEndDate(monthBucket: Int): String = {
+  val year = monthBucket / 100
+  val month = monthBucket % 100
+  year.toString + "-" + pad2(month) + "-" + pad2(daysInMonth(year, month))
+}
+
+def monthPublishCalendarReady(monthBucket: Int, now: Time.T): Boolean = {
+  val monthEndStart = utcYyyyMmDd.parse(periodEndDate(monthBucket))
+  now.inMillis >= monthEndStart.plus(minDaysAfterMonthEnd.days).inMillis
+}
+
+def reportMonthBucket(now: Time.T, maxMonthBucket: Int): Int = {
+  val candidate = calendarMonthBefore(now)
+  val calendarMonth =
+    if (monthPublishCalendarReady(candidate, now)) {
+      candidate
+    } else {
+      monthBucketBefore(candidate)
+    }
+  if (maxMonthBucket > 0 && calendarMonth > maxMonthBucket) {
+    maxMonthBucket
+  } else {
+    calendarMonth
+  }
+}
+
+def reportPeriodLabel(monthBucket: Int): String = {
+  val year = monthBucket / 100
+  val month = monthBucket % 100
+  englishMonthNames.apply(month - 1) + " " + year.toString
+}
+
+def calendarDaysInMonthBucket(monthBucket: Int): Int = {
+  val year = monthBucket / 100
+  val month = monthBucket % 100
+  daysInMonth(year, month)
+}
+
+def daysInPeriod(monthBucket: Int, daysIncluded: Option[UthDaysIncluded]): Int =
+  daysIncluded match {
+    case Some(d) =>
+      (d.firstCoveredDay, d.completeThroughDay) match {
+        case (Some(first), Some(through))
+            if first / 100 == monthBucket && through / 100 == monthBucket && through >= first =>
+          (through % 100) - (first % 100) + 1
+        case _ =>
+          calendarDaysInMonthBucket(monthBucket)
+      }
+    case None =>
+      calendarDaysInMonthBucket(monthBucket)
+  }
+
+def lastDayOfMonthBucket(monthBucket: Int): Int = {
+  val year = monthBucket / 100
+  val month = monthBucket % 100
+  year * 10000 + month * 100 + daysInMonth(year, month)
+}
+
+def monthObservationComplete(monthBucket: Int, daysIncluded: Option[UthDaysIncluded]): Boolean =
+  daysIncluded.flatMap { d => d.finalThroughDay }.exists { ft =>
+    ft >= lastDayOfMonthBucket(monthBucket)
+  }
+
+def generatedAtMillis(daysIncluded: Option[UthDaysIncluded], fallbackMs: Long): Long =
+  daysIncluded
+    .flatMap { d =>
+      d.generatedAtMs match {
+        case Some(ms) => Some(ms)
+        case None => d.snapshotEpoch
+      }
+    }
+    .getOrElse(fallbackMs)
+
+def formatGeneratedAtIso(ms: Long): String =
+  utcIsoSeconds.format(Time.fromMilliseconds(ms))
+
+def sumCarried(days: Option[Seq[UthDayCarriedRemoved]]): Long =
+  days.getOrElse(Seq.empty).foldLeft(0L) { (acc, d) =>
+    acc + d.carried.getOrElse(0L)
+  }
+
+def sumDayCounts(days: Option[Seq[UthDayCount]]): Long =
+  days.getOrElse(Seq.empty).foldLeft(0L) { (acc, d) =>
+    acc + d.count.getOrElse(0L)
+  }
+
+def formatPercentage(numerator: Long, denominator: Long): String = {
+  if (denominator <= 0L) {
+    "0%"
+  } else {
+    val hundredths = ((numerator.toDouble * 10000.0) / denominator.toDouble).toInt
+    val whole = hundredths / 100
+    val frac = hundredths % 100
+    if (frac < 10) {
+      whole.toString + ".0" + frac.toString + "%"
+    } else {
+      whole.toString + "." + frac.toString + "%"
+    }
+  }
+}
+
+def postLabelRow(
+    raw: String,
+    countryCodes: Seq[String],
+    carried: Long,
+    postCount: Long,
+    includeTakedowns: Boolean
+): Option[{
+  label: String,
+  about: String,
+  effect: String,
+  posts: Long,
+  totalPostsInMonth: Long,
+  percentageOfPosts: String
+}] =
+  if (underTheHoodLabels.isPostLabel(raw)) {
+    Some({
+      label = underTheHoodLabels.postLabelName(raw),
+      about = underTheHoodLabels.postLabelAbout(raw),
+      effect = underTheHoodLabels.postLabelEffect(raw),
+      posts = carried,
+      totalPostsInMonth = postCount,
+      percentageOfPosts = formatPercentage(carried, postCount),
+    })
+  } else if (includeTakedowns && underTheHoodLabels.isPostTakedownLabel(raw, countryCodes)) {
+    Some({
+      label = underTheHoodLabels.takedownLabelName(raw, countryCodes),
+      about = underTheHoodLabels.postTakedownAbout(raw, countryCodes),
+      effect = underTheHoodLabels.postTakedownEffect(raw, countryCodes),
+      posts = carried,
+      totalPostsInMonth = postCount,
+      percentageOfPosts = formatPercentage(carried, postCount),
+    })
+  } else {
+    None
+  }
+
+def accountLabelRow(
+    raw: String,
+    countryCodes: Seq[String],
+    days: Long,
+    periodDays: Int,
+    includeTakedowns: Boolean
+): Option[{
+  label: String,
+  about: String,
+  effect: String,
+  days: Long,
+  daysInPeriod: Int,
+  percentageOfDays: String
+}] =
+  if (underTheHoodLabels.isAccountLabel(raw)) {
+    Some({
+      label = underTheHoodLabels.accountLabelName(raw),
+      about = underTheHoodLabels.accountLabelAbout(raw),
+      effect = underTheHoodLabels.accountLabelEffect(raw),
+      days = days,
+      daysInPeriod = periodDays,
+      percentageOfDays = formatPercentage(days, periodDays.toLong),
+    })
+  } else if (includeTakedowns && underTheHoodLabels.isAccountTakedownLabel(raw, countryCodes)) {
+    Some({
+      label = underTheHoodLabels.takedownLabelName(raw, countryCodes),
+      about = underTheHoodLabels.accountTakedownAbout(raw, countryCodes),
+      effect = underTheHoodLabels.accountTakedownEffect(raw, countryCodes),
+      days = days,
+      daysInPeriod = periodDays,
+      percentageOfDays = formatPercentage(days, periodDays.toLong),
+    })
+  } else {
+    None
+  }
+
+def buildReportJson(
+    userMonth: UthUserMonthAggregate,
+    monthBucket: Int,
+    generatedAtMs: Long,
+    periodDays: Int,
+    includeTakedowns: Boolean
+): String = {
+  val postCount = userMonth.eligiblePostAgg
+    .map { days => sumDayCounts(Some(days)) }
+    .getOrElse(0L)
+  val period = {
+    startDate = periodStartDate(monthBucket),
+    endDate = periodEndDate(monthBucket),
+    timezone = "UTC",
+  }
+
+  val postLabels = userMonth.postLabelAgg
+    .getOrElse(Seq.empty)
+    .flatMap { agg =>
+      agg.label.flatMap { raw =>
+        postLabelRow(
+          raw,
+          agg.countryCodes.getOrElse(Seq.empty),
+          sumCarried(agg.days),
+          postCount,
+          includeTakedowns)
+      }
+    }
+
+  val accountLabels = userMonth.accountLabelAgg
+    .getOrElse(Seq.empty)
+    .flatMap { agg =>
+      agg.label.flatMap { raw =>
+        val days = agg.activeDays.map { d => d.size.toLong }.getOrElse(0L)
+        accountLabelRow(
+          raw,
+          agg.countryCodes.getOrElse(Seq.empty),
+          days,
+          periodDays,
+          includeTakedowns)
+      }
+    }
+
+  if (postLabels.isEmpty && accountLabels.isEmpty) {
+    {
+      notes = reportNoteString,
+      period = period,
+      generatedAt = formatGeneratedAtIso(generatedAtMs),
+      postCount = postCount,
+      postLabels = postLabels,
+      accountLabels = accountLabels,
+      totalPostLabels = 0,
+      totalAccountLabels = 0,
+    }.toJson
+  } else if (postLabels.isEmpty) {
+    {
+      notes = reportNoteString,
+      period = period,
+      generatedAt = formatGeneratedAtIso(generatedAtMs),
+      postCount = postCount,
+      postLabels = postLabels,
+      accountLabels = accountLabels,
+      totalPostLabels = 0,
+    }.toJson
+  } else if (accountLabels.isEmpty) {
+    {
+      notes = reportNoteString,
+      period = period,
+      generatedAt = formatGeneratedAtIso(generatedAtMs),
+      postCount = postCount,
+      postLabels = postLabels,
+      accountLabels = accountLabels,
+      totalAccountLabels = 0,
+    }.toJson
+  } else {
+    {
+      notes = reportNoteString,
+      period = period,
+      generatedAt = formatGeneratedAtIso(generatedAtMs),
+      postCount = postCount,
+      postLabels = postLabels,
+      accountLabels = accountLabels,
+    }.toJson
+  }
+}
+
+def userWithQueryFields(
+  userId: Long,
+  queryFields: Set[com.twitter.gizmoduck.QueryFields]
+): Option[User] = {
+  val view = (
+    { includeProtected = true, includeSuspended = true },
+    queryFields
+  )
+  #User(userId)["gizmoduck/composite"@view]
+}
+
+def meetsAccountAgeMinimum(user: User, now: Time.T): Boolean = {
+  user.createdAtMsec < now.minus(minimumAccountAge).inMillis
+}
+
+def isSuspended(user: User): Boolean =
+  user.safety.map { s => s.suspended }.getOrElse(false)
+
+def monthMetaKey(monthBucket: Int): UthUserMonthKey = {
+  userId = metadataUserId,
+  monthBucket = monthBucket,
+}
+
+def monthDataReady(
+  monthBucket: Int,
+  monthMetaOpt: Option[UthUserMonthAggregate],
+  userMonthOpt: Option[UthUserMonthAggregate]
+): Boolean =
+  userMonthOpt.exists { um =>
+    monthObservationComplete(monthBucket, um.daysIncluded)
+  } || monthMetaOpt.exists { meta =>
+    monthObservationComplete(monthBucket, meta.daysIncluded)
+  }
+
+val fetchOp = Op.fetch[Key, View, Value] { ctx =>
+  val now = Time.now
+  val gizUserOpt = userWithQueryFields(ctx.key, Set(Account, Safety))
+  if (gizUserOpt.map { user => isSuspended(user) }.getOrElse(false)) {
+    Ok.missing
+  } else {
+  val ageOk =
+    gizUserOpt.map({ user =>
+      meetsAccountAgeMinimum(user, now)
+    }).getOrElse(false)
+
+  val primaryMonth = reportMonthBucket(now, params.underTheHoodReportMaxMonthBucket())
+  val includeTakedowns = params.underTheHoodReportTakedownsEnabled()
+  val primaryUserKey: UthUserMonthKey = {
+    userId = ctx.key,
+    monthBucket = primaryMonth,
+  }
+  val primaryMeta =
+    #<visibility/under-the-hood/mh/userMonthAggregates>.fetch(monthMetaKey(primaryMonth), ()).v
+  val primaryUser =
+    #<visibility/under-the-hood/mh/userMonthAggregates>.fetch(primaryUserKey, ()).v
+
+  val usePrimary = monthDataReady(primaryMonth, primaryMeta, primaryUser)
+  val monthBucket =
+    if (usePrimary) { primaryMonth } else { monthBucketBefore(primaryMonth) }
+  val monthMetaOpt =
+    if (usePrimary) {
+      primaryMeta
+    } else {
+      #<visibility/under-the-hood/mh/userMonthAggregates>
+        .fetch(monthMetaKey(monthBucket), ()).v
+    }
+  val userMonthOpt =
+    if (usePrimary) {
+      primaryUser
+    } else {
+      val fallbackKey: UthUserMonthKey = {
+        userId = ctx.key,
+        monthBucket = monthBucket,
+      }
+      #<visibility/under-the-hood/mh/userMonthAggregates>.fetch(fallbackKey, ()).v
+    }
+
+  userMonthOpt match {
+    case None =>
+      monthMetaOpt match {
+        case None =>
+          Ok.missing
+        case Some(meta) =>
+          if (!monthObservationComplete(monthBucket, meta.daysIncluded)) {
+            Ok.missing
+          } else {
+            val reportInfo = {
+              reportPeriod = Some(reportPeriodLabel(monthBucket)),
+              eligibilityChecks = Some(Map(
+                postsCheckLabel -> false,
+                ageCheckLabel -> ageOk,
+              )),
+              note = Some(reportNote()),
+            }
+            Ok.value(Some({
+              reportJson = None,
+              reportInfo = Some(reportInfo),
+            }))
+          }
+      }
+    case Some(userMonth) =>
+      val daysIncludedForTs = userMonth.daysIncluded
+      if (!monthObservationComplete(monthBucket, daysIncludedForTs)) {
+        Ok.missing
+      } else {
+        val postCount = userMonth.eligiblePostAgg
+          .map { days => sumDayCounts(Some(days)) }
+          .getOrElse(0L)
+        val hasEnoughPosts = postCount >= minimumEligiblePosts
+        val eligibilityChecks = Map(
+          postsCheckLabel -> hasEnoughPosts,
+          ageCheckLabel -> ageOk,
+        )
+        val reportInfo = {
+          reportPeriod = Some(reportPeriodLabel(monthBucket)),
+          eligibilityChecks = Some(eligibilityChecks),
+          note = Some(reportNote()),
+        }
+        val generatedAtMs = generatedAtMillis(daysIncludedForTs, now.inMillis)
+        val periodDays = daysInPeriod(monthBucket, daysIncludedForTs)
+        val reportJson =
+          if (ageOk && hasEnoughPosts) {
+            Some(buildReportJson(userMonth, monthBucket, generatedAtMs, periodDays, includeTakedowns))
+          } else {
+            None
+          }
+        Ok.value(Some({
+          reportJson = reportJson,
+          reportInfo = Some(reportInfo),
+        }))
+      }
+  }
+  }
+}
+
+Managed({
+  source = QueryColumn({ ops = Map(Fetch -> fetchOp) }),
+  contactInfo = Some(sharedConfig.contactInfo),
+  lifecycle = Production,
+  accessPolicy = AnyOf({
+    policies = Seq(
+      FromColumns(Set(Path("visibility/under-the-hood/underTheHoodReport"))),
+      Has({ principal = LdapGroup({ id = "visibility-admins" }) }),
+      Has({ principal = LdapGroup({ id = "birdwatch-admins" }) }),
+    )
+  }),
+  description = PlainText(
+    "Per-user Under the Hood transparency report (keyed by user id). " +
+      "Picks the latest prior UTC month past the 10-day calendar floor (keep at 10+), capped by FS " +
+      "under_the_hood_report_max_month_bucket when > 0; if that month lacks complete observation " +
+      "(finalThroughDay), falls back one month. Takedown rows (label = reason name + countryCodes) in " +
+      "postLabelAgg / accountLabelAgg render only when FS under_the_hood_report_takedowns_enabled. " +
+      "Uses the per-user row when present; if missing, userId=-1 month-meta can still return " +
+      "reportInfo without reportJson. Missing only when both user and meta are absent/incomplete. " +
+      "eligibilityChecks = posts/age only. Called by underTheHoodReport for the authenticated viewer."
+  ),
+})

@@ -1,0 +1,11 @@
+scala_library(
+    compiler_option_sets = ["fatal_warnings"],
+    dependencies = [
+        "3rdparty/jvm/org/mockito:mockito-core",
+        "finatra-internal/deprecated/src/test/scala/com/twitter/inject",
+        "finatra/inject/inject-core/src/test/scala:test-deps",
+        "media-understanding/media-model-proxy/src/main/scala/com/twitter/media_understanding/model_proxy/modules",
+    ],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)

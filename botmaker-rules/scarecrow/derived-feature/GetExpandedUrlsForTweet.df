@@ -1,0 +1,22 @@
+description:\nexpression: |
+  params(Long :tweetId)
+  CacheGet(
+    Concat("GetExpandedUrlsForTweet", ToString(:tweetId)),
+    {
+      val :tweetText = GetTweetFullText(:tweetId);
+      val :cardInfo = GetTweetCardOrEmptyObject(:tweetId);
+      val :cardString = DictGetOrElse(:cardInfo, "unified_card","");
+      val :cardUrl = Replace(Replace(:cardString,".*url_data.:..url.:.",""),"\".*","");
+      # val :cardUrl = DictGetOrElse(:cardInfo, "website_url", "");
+      val :allUrls = GetUrls(
+        JoinList(" ", [
+          ToString(GetMapValues(GetUrlResolutions(GetUrls(:tweetText)))),
+          ToString(GetMapValues(GetUrlResolutions(Set(:cardUrl)))),
+          ToString(GetMapKeys(GetUrlResolutions(Set(:cardUrl))))
+        ])
+      );
+      :allUrls
+    }
+  )
+logged: 'false'
+returnType: StrSetValue

@@ -1,0 +1,18 @@
+import <hydra/sharedConfig>
+
+StreamForwarder({
+  source = KafkaTopic({
+    topic = "phoenix_rankall_fav_event",
+    dest = "/s/kafka/main-2",
+    consumerGroupId = "incremental_fav_event_lap0",
+    mapping = ValueOnly({
+      value = Type(com.twitter.strato.columns.hydra.PhoenixRankAllIndexingRequest),
+      encoding = ThriftEncoding
+    })
+  }),
+  forwardToOp = Execute,
+  forwardEventsFrom = LocalZoneOnly,
+  forwardToColumn = #<hydra/phoenix_rank_all/phoenixRankAllCandidateProcessor>,
+  contactInfo = Some(sharedConfig.contactInfo),
+  lifecycle = Development
+})

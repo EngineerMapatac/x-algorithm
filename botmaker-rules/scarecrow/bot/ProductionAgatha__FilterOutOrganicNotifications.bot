@@ -1,0 +1,39 @@
+id: '21278'
+description:\nevent: new_send_notification_write
+condition: |
+  Exists(spammerId) &&
+  Exists(victimId) &&
+  spammerId != victimId &&
+  !IsTestUser(spammerId) &&
+  !HasRemediationFatigueLabel(SpammerIdString) &&
+  !Contains(GetUserLabels(spammerId), "AGATHA_SPAM_TOP_USER") &&
+  {
+    val :scores = GetUserHealthScores(
+      spammerId,
+      List("AgathaSpamSuspended", "AgathaAllSpamReportsPerFav", "AgathaSpamReportsPerFav")
+    );
+    val :spamSuspendedScore = DictGetOrElse(:scores, "AgathaSpamSuspended", -1.0);
+    val :allSpamReportsPerFavScore = DictGetOrElse(:scores, "AgathaAllSpamReportsPerFav", -1.0);
+    val :spamReportsPerFavScore = DictGetOrElse(:scores, "AgathaSpamReportsPerFav", -1.0);
+    :spamSuspendedScore > 0.99 ||
+    :allSpamReportsPerFavScore > 0.999 ||
+    :spamReportsPerFavScore > 0.999
+  } &&
+  !IsHighPageRankUser(spammerId) &&
+  !Contains(GetLongList(`AutoExpiringTempSkipList`), spammerId) &&
+  !IsUserGrayVerified(spammerId)
+action: |
+  {
+    DoAsync({
+      SetUserLabel(
+        spammerId,
+        "AGATHA_SPAM_TOP_USER",
+        "Account identified in agatha spam models go/bot/21278",
+        CurrentTimeMs() + (OneWeekInSecs * 1000)
+      );
+      SetRemediationFatigueLabel(SpammerIdString, OneDayInSecs * 6);
+    });
+  }
+expiry: +292278994-08-17T07:12:55.807Z
+isActive: 'true'
+owner:\nactionLimits: {}

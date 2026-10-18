@@ -1,0 +1,104 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 X.AI Corp.
+[workspace]
+resolver = "2"
+members = [
+    "crates/common/xai-recsys",
+    "crates/serving/xai-recsys-engine",
+    "crates/serving/xai-recsys-mm-server",
+    "crates/serving/xai-recsys-proto",
+    "crates/serving/xai-recsys-server",
+    "crates/serving/xai-recsys-sid-proto",
+    "crates/serving/xai-recsys-sid-retrieval",
+    "crates/serving/xai-recsys-sid-retrieval-proto",
+    "crates/storage/xai-o2",
+]
+
+[workspace.package]
+edition = "2024"
+
+[workspace.dependencies]
+anyhow = { version = "1", features = ["backtrace"] }
+arc-swap = "1.7"
+arrow = { version = "59", features = ["ipc_compression"] }
+async-trait = "0.1"
+autometrics = { version = "2", features = ["prometheus-exporter"] }
+axum = { version = "0.8", features = ["macros", "ws"] }
+bincode = "1"
+bytemuck = "1"
+bytes = { version = "1", features = ["serde"] }
+chrono = "0.4"
+clap = { version = "4", features = ["derive", "env"] }
+crc32c = "0.6"
+crc32fast = "1.4"
+env_logger = "0.11"
+fastrace = { version = "0.7" }
+fastrace-tonic = { version = "0.1" }
+futures = "0.3"
+google-cloud-auth = "1.7"
+half = "2.7.1"
+heed = "0.20"
+http = "1"
+http-body = "1"
+http-body-util = "0.1"
+ibverbs = { git = "https://github.com/jonhoo/rust-ibverbs", rev = "f8f17509c1897ffb7218fb8297209d7befb75da4" }
+lazy_static = "1"
+libc = "0.2"
+log = { version = "0.4", features = ["kv", "kv_unstable"] }
+md5 = "0.8"
+memmap2 = "0.9.8"
+moka = "0.12"
+murmur3 = "0.5.2"
+nix = { version = "0.30", features = ["poll", "process", "signal", "sched", "term", "mount", "fs", "ioctl", "mman", "reboot", "user"] }
+num = "0.4.3"
+num_cpus = "1"
+numpy = { version = "0.26", features = ["half"] }
+object_store = "0.13"
+parking_lot = "0.12.4"
+parquet = { version = "59", default-features = false, features = ["arrow", "async", "encryption", "object_store", "crc", "snap", "zstd", "lz4"] }
+prometheus = { version = "0.14", features = ["process"] }
+prost = "0.14"
+prost-build = "0.14"
+pyo3 = { version = "0.26", features = ["bytes"] }
+rand = "0.9"
+rayon = "1"
+rcgen = { version = "0.13", features = ["pem"] }
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+scopeguard = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serial_test = "3"
+simd-adler32 = "0.3.7"
+static_assertions = "1.1.0"
+tempfile = "3"
+thrift = "0.24.0"
+tokio = { version = "1", features = ["full"] }
+tokio-rustls = "0.26"
+tokio-stream = { version = "0.1", features = ["net"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tonic = { version = "0.14", features = ["tls-aws-lc", "gzip", "deflate", "zstd"] }
+tonic-health = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = "0.14"
+tonic-reflection = "0.14"
+tower = "0.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["env-filter", "smallvec", "tracing-log", "std", "ansi"] }
+url = "2"
+xai-o2 = { path = "crates/storage/xai-o2" }
+xai-recsys = { path = "crates/common/xai-recsys" }
+xai-recsys-mm-server = { path = "crates/serving/xai-recsys-mm-server" }
+xai-recsys-proto = { path = "crates/serving/xai-recsys-proto" }
+xai-recsys-server = { path = "crates/serving/xai-recsys-server" }
+xai-recsys-sid-proto = { path = "crates/serving/xai-recsys-sid-proto" }
+xai-recsys-sid-retrieval-proto = { path = "crates/serving/xai-recsys-sid-retrieval-proto" }
+zstd = "0.13"
+
+[workspace.lints.clippy]
+doc_lazy_continuation = "allow"
+doc_overindented_list_items = "allow"
+needless_lifetimes = "allow"
+single_range_in_vec_init = "allow"
+too_many_arguments = "allow"
+uninlined_format_args = "allow"
+useless_format = "allow"

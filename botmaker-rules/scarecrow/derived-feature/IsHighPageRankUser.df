@@ -1,0 +1,30 @@
+description:\nexpression: |
+  params(Long :userId)
+  { CacheGet(Concat("df.IsHighPageRankUser", :userId), {
+    val :userCredScore = TryOrElse(GetUserCredV2(:userId).score, NULL);
+    val :predictedHighPageRank = {
+      val :userLabels = TryOrElse(GetUserLabels(:userId), EmptyStringSet);
+      Contains(:userLabels, "PREDICTED_HIGH_PAGE_RANK")
+    };
+    val :pageRankCriteria = Coalesce(:userCredScore, -1) >= HighPageRankThreshold || :predictedHighPageRank;
+
+    val :followerCountFromGizmoduck = Coalesce(FollowerCountFromGizmoduck(:userId), 0);
+    val :fallbackFollowerCountCriteria = :followerCountFromGizmoduck > 25000;
+
+    val :usePageRankCriteria = :userCredScore != NULL || :predictedHighPageRank;
+
+    val :isHighPageRankUser =
+      if (:usePageRankCriteria) { :pageRankCriteria }
+      else { :fallbackFollowerCountCriteria };
+
+    val :definition =
+      if (:usePageRankCriteria) { "PageRank" }
+      else { "FollowerCount" };
+
+    Log(Join("/", RULE_ID, "IsHighPageRankUser", "DefinitionFor", :userId), :definition);
+    Log(Join("/", RULE_ID, "IsHighPageRankUser", "VerdictFor", :userId), :isHighPageRankUser);
+
+    :isHighPageRankUser
+  })}
+logged: 'false'
+returnType: Auto

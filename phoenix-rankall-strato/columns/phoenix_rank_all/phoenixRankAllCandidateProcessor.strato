@@ -1,0 +1,553 @@
+import <hydra/sharedConfig>
+import <hydra/eventProcessing>
+import <content_understanding/tweetUtil>
+
+type PhoenixRankAllIndexingRequest = com.twitter.strato.columns.hydra.PhoenixRankAllIndexingRequest
+type Tweet = com.twitter.tweetypie.Tweet
+type UnifiedPostAnnotations = com.twitter.strato.columns.content_understanding.UnifiedPostAnnotations
+type EngagementCount = com.twitter.strato.columns.hydra.EngagementCount
+type PhoenixRankAllCandidate = com.twitter.strato.columns.hydra.PhoenixRankAllCandidate
+type PhoenixRankAllObject = com.twitter.strato.columns.hydra.PhoenixRankAllObject
+type FilteredTopicsByExperiment = com.twitter.strato.columns.hydra.FilteredTopicsByExperiment
+
+val postMultimodalEmbeddingMhColumnV2 = #<searchai/storage/postMultimodalEmbeddingMhV2>
+
+
+def buildAdsIndex(candidate: PhoenixRankAllCandidate, stats: Stats.StatsReceiver): Unit = {
+  val object = {
+    postId = candidate.postId,
+    authorId = candidate.authorId,
+    indexName = "ads"
+  }
+  #<hydra/kafka/indexingEventKafkaTopic>.insert((), object)
+  stats.counter("ads_indexing_event_created").incr(1)
+}
+
+def buildEvergreenVideoIndex(candidate: PhoenixRankAllCandidate, stats: Stats.StatsReceiver): Unit = {
+  val object = {
+    postId = candidate.postId,
+    authorId = candidate.authorId,
+    indexName = "evergreen_video"
+  }
+  #<hydra/kafka/indexingEventKafkaTopic>.insert((), object)
+  stats.counter("evergreen_video_indexing_event_created").incr(1)
+}
+
+def buildEvergreenNsfwVideoIndex(candidate: PhoenixRankAllCandidate, stats: Stats.StatsReceiver): Unit = {
+  val object = {
+    postId = candidate.postId,
+    authorId = candidate.authorId,
+    indexName = "evergreen_nsfw_video"
+  }
+  #<hydra/kafka/indexingEventKafkaTopic>.insert((), object)
+  stats.counter("evergreen_nsfw_video_indexing_event_created").incr(1)
+}
+
+def buildSearchUnfilteredIndex(candidate: PhoenixRankAllCandidate, stats: Stats.StatsReceiver): Unit = {
+  candidate.engagementCount match {
+    case Some(ec) =>
+      if(ec.favoriteCount.getOrElse(0) >= 1) {
+        val object = {
+          postId = candidate.postId,
+          authorId = candidate.authorId,
+          indexName = "search_unfiltered"
+        }
+        #<hydra/kafka/indexingEventKafkaTopic>.insert((), object)
+        stats.counter("search_unfiltered_indexing_event_created").incr(1)
+      }
+    case None => ()
+  }
+}
+
+def build32FavIndex(candidate: PhoenixRankAllCandidate, stats: Stats.StatsReceiver): Unit = {
+  candidate.engagementCount match {
+    case Some(ec) =>
+      if(ec.favoriteCount.getOrElse(0) >= 32) {
+        val object = {
+          postId = candidate.postId,
+          authorId = candidate.authorId,
+          indexName = "32fav"
+        }
+        #<hydra/kafka/indexingEventKafkaTopic>.insert((), object)
+        stats.counter("32fav_indexing_event_created").incr(1)
+      }
+    case None => ()
+  }
+}
+
+def build1FavIndex(candidate: PhoenixRankAllCandidate, stats: Stats.StatsReceiver): Unit = {
+  if (candidate.engagementCount.flatMap { ec => ec.favoriteCount }.getOrElse(0) == 0) {
+    stats.counter("1fav_uec_count_race").incr(1)
+  }
+  val object = {
+    postId = candidate.postId,
+    authorId = candidate.authorId,
+    indexName = "1fav"
+  }
+  #<hydra/kafka/indexingEventKafkaTopic>.insert((), object)
+  stats.counter("1fav_indexing_event_created").incr(1)
+}
+
+def build1FavIndexBackup(candidate: PhoenixRankAllCandidate, stats: Stats.StatsReceiver): Unit = {
+  val object = {
+    postId = candidate.postId,
+    authorId = candidate.authorId,
+    indexName = "1fav"
+  }
+  #<hydra/kafka/indexingEventKafkaBackupTopic>.insert((), object)
+  stats.counter("1fav_backup_indexing_event_created").incr(1)
+}
+
+def emitCategoryStats(
+  stats: Stats.StatsReceiver,
+  experimentOption: Int,
+  topicEntityIds: Seq[Long]
+): Unit = {
+  val categories = eventProcessing.getCategoriesForTopicEntityIds(topicEntityIds)
+  val optionStr = experimentOption.toString
+  
+  val categoryList = categories.toSeq
+  val emitted = categoryList.map { category =>
+    stats.counter("1fav_topic_option_" + optionStr + "_category_" + category + "_posts").incr(1)
+  }
+  stats.counter("1fav_topic_option_" + optionStr + "_categories_emitted").incr(emitted.foldLeft(0) { (acc, x) => acc + 1 })
+}
+
+def buildTopicIndexWithTopics(
+  candidate: PhoenixRankAllCandidate,
+  stats: Stats.StatsReceiver,
+  experimentOption: Int,
+  topicEntityIds: Seq[Long]
+): Unit = {
+  val indexName = experimentOption match {
+    case 0 => "1fav_topic"
+    case 1 => "1fav_topic_option_1"
+    case 2 => "1fav_topic_option_2"
+    case 3 => "1fav_topic_option_3"
+    case 4 => "1fav_topic_option_4"
+    case 5 => "1fav_topic_option_5"
+    case _ => "1fav_topic_option_unknown"
+  }
+  
+  val topicCount = topicEntityIds.foldLeft(0) { (acc, topic) => acc + 1 }
+  
+  experimentOption match {
+    case 0 => stats.counter("1fav_topic_option_0_count").incr(topicCount)
+    case 1 => stats.counter("1fav_topic_option_1_count").incr(topicCount)
+    case 2 => stats.counter("1fav_topic_option_2_count").incr(topicCount)
+    case 3 => stats.counter("1fav_topic_option_3_count").incr(topicCount)
+    case 4 => stats.counter("1fav_topic_option_4_count").incr(topicCount)
+    case 5 => stats.counter("1fav_topic_option_5_count").incr(topicCount)
+    case _ => ()
+  }
+  
+  emitCategoryStats(stats, experimentOption, topicEntityIds)
+  
+  if (topicEntityIds.nonEmpty) {
+    val object = {
+      postId = candidate.postId,
+      authorId = candidate.authorId,
+      indexName = indexName,
+      topicEntityIds = Some(topicEntityIds)
+    }
+    #<hydra/kafka/indexingEventKafkaBackupTopic>.insert((), object)
+    
+    experimentOption match {
+      case 0 => stats.counter("1fav_topic_option_0_index_created").incr(1)
+      case 1 => stats.counter("1fav_topic_option_1_index_created").incr(1)
+      case 2 => stats.counter("1fav_topic_option_2_index_created").incr(1)
+      case 3 => stats.counter("1fav_topic_option_3_index_created").incr(1)
+      case 4 => stats.counter("1fav_topic_option_4_index_created").incr(1)
+      case 5 => stats.counter("1fav_topic_option_5_index_created").incr(1)
+      case _ => ()
+    }
+  }
+}
+
+
+val usIranWarTopicEntityId = 2000000000000000001L
+val xaiNewsEntityId = 1925949634972626944L
+
+def isNewsPost(unifiedPostAnnotationsOpt: Option[UnifiedPostAnnotations]): Boolean = {
+  val topicEntityIds = eventProcessing.getUnifiedPostTopicEntityIds(unifiedPostAnnotationsOpt)
+  topicEntityIds.contains(xaiNewsEntityId)
+}
+
+def hasIranTag(unifiedPostAnnotationsOpt: Option[UnifiedPostAnnotations]): Boolean = {
+  unifiedPostAnnotationsOpt match {
+    case Some(annotations) =>
+      annotations.tags.getOrElse(Seq.empty).exists { tagMeta =>
+        tagMeta.tag == "Iran" || tagMeta.tag == "iran" ||
+        tagMeta.normalizedTag == Some("Iran") || tagMeta.normalizedTag == Some("iran")
+      }
+    case None => false
+  }
+}
+
+
+val stocksAndEconomyTopicEntityId = 2000000000000000002L
+val xaiBusinessAndFinanceEntityId = 1925949659857530880L
+
+def isBusinessAndFinancePost(unifiedPostAnnotationsOpt: Option[UnifiedPostAnnotations]): Boolean = {
+  val topicEntityIds = eventProcessing.getUnifiedPostTopicEntityIds(unifiedPostAnnotationsOpt)
+  topicEntityIds.contains(xaiBusinessAndFinanceEntityId)
+}
+
+val stocksAndEconomyTags: Set[String] = Set(
+  "interest rates", "federal reserve", "bonds", "options", "futures",
+  "employment", "energy", "oil", "stocks", "macroeconomics", "economy"
+)
+
+def hasStocksAndEconomyTag(unifiedPostAnnotationsOpt: Option[UnifiedPostAnnotations]): Boolean = {
+  unifiedPostAnnotationsOpt match {
+    case Some(annotations) =>
+      annotations.tags.getOrElse(Seq.empty).exists { tagMeta =>
+        val tagLower = tagMeta.tag.toLowerCase()
+        val normalizedLower = tagMeta.normalizedTag.map({ t => t.toLowerCase() })
+        stocksAndEconomyTags.contains(tagLower) || normalizedLower.exists({ t => stocksAndEconomyTags.contains(t) })
+      }
+    case None => false
+  }
+}
+
+def build1FavTopicIndex(candidate: PhoenixRankAllCandidate, stats: Stats.StatsReceiver): Unit = {
+  stats.counter("1fav_topic_build_all_options").incr(1)
+  
+  val isUSIranWarEligible = isNewsPost(candidate.unifiedPostAnnotations) && hasIranTag(candidate.unifiedPostAnnotations)
+  if (isUSIranWarEligible) {
+    stats.counter("us_iran_war_topic_entity_eligible").incr(1)
+  }
+  
+  val isStocksAndEconomyEligible = isBusinessAndFinancePost(candidate.unifiedPostAnnotations) && hasStocksAndEconomyTag(candidate.unifiedPostAnnotations)
+  if (isStocksAndEconomyEligible) {
+    stats.counter("stocks_and_economy_topic_entity_eligible").incr(1)
+  }
+  
+  val unfilteredTopicsBase = eventProcessing.getFilteredTopicEntityIds(candidate.unifiedPostAnnotations, candidate.authorId, 0)
+  val curatedV0TopicsBase = eventProcessing.getFilteredTopicEntityIds(candidate.unifiedPostAnnotations, candidate.authorId, 1)
+  val curatedV0V1TopicsBase = eventProcessing.getFilteredTopicEntityIds(candidate.unifiedPostAnnotations, candidate.authorId, 2)
+  val postBased90PctTopicsBase = eventProcessing.getFilteredTopicEntityIds(candidate.unifiedPostAnnotations, candidate.authorId, 3)
+  val postBased75PctTopicsBase = eventProcessing.getFilteredTopicEntityIds(candidate.unifiedPostAnnotations, candidate.authorId, 4)
+  val postBased50PctTopicsBase = eventProcessing.getFilteredTopicEntityIds(candidate.unifiedPostAnnotations, candidate.authorId, 5)
+  
+  val iranSuffix = if (isUSIranWarEligible) { Seq(usIranWarTopicEntityId) } else { Seq.empty[Long] }
+  val stocksEconSuffix = if (isStocksAndEconomyEligible) { Seq(stocksAndEconomyTopicEntityId) } else { Seq.empty[Long] }
+  val urgentTopicSuffix = iranSuffix ++ stocksEconSuffix
+  val unfilteredTopics = unfilteredTopicsBase ++ urgentTopicSuffix
+  val curatedV0Topics = curatedV0TopicsBase ++ urgentTopicSuffix
+  val curatedV0V1Topics = curatedV0V1TopicsBase ++ urgentTopicSuffix
+  val postBased90PctTopics = postBased90PctTopicsBase ++ urgentTopicSuffix
+  val postBased75PctTopics = postBased75PctTopicsBase ++ urgentTopicSuffix
+  val postBased50PctTopics = postBased50PctTopicsBase ++ urgentTopicSuffix
+  
+  val filteredTopicsValue: FilteredTopicsByExperiment = {
+    unfilteredTopicIds = if (unfilteredTopics.nonEmpty) { Some(unfilteredTopics) } else { None },
+    curatedV0TopicIds = if (curatedV0Topics.nonEmpty) { Some(curatedV0Topics) } else { None },
+    curatedV0V1TopicIds = if (curatedV0V1Topics.nonEmpty) { Some(curatedV0V1Topics) } else { None },
+    postBased90PctTopicIds = if (postBased90PctTopics.nonEmpty) { Some(postBased90PctTopics) } else { None },
+    postBased75PctTopicIds = if (postBased75PctTopics.nonEmpty) { Some(postBased75PctTopics) } else { None },
+    postBased50PctTopicIds = if (postBased50PctTopics.nonEmpty) { Some(postBased50PctTopics) } else { None }
+  }
+  
+  #<hydra/mh/filteredTopicsByExperiment>.put(candidate.postId, filteredTopicsValue)
+  stats.counter("1fav_topic_mh_stored").incr(1)
+  
+  buildTopicIndexWithTopics(candidate, stats, 0, unfilteredTopics)
+  buildTopicIndexWithTopics(candidate, stats, 1, curatedV0Topics)
+  buildTopicIndexWithTopics(candidate, stats, 2, curatedV0V1Topics)
+  buildTopicIndexWithTopics(candidate, stats, 3, postBased90PctTopics)
+  buildTopicIndexWithTopics(candidate, stats, 4, postBased75PctTopics)
+  buildTopicIndexWithTopics(candidate, stats, 5, postBased50PctTopics)
+}
+
+def build1FavVideoIndex(candidate: PhoenixRankAllCandidate, stats: Stats.StatsReceiver): Unit = {
+  candidate.tweetMedadata match {
+    case Some(tweet) if eventProcessing.hasValidImmersiveVideo(tweet) =>
+      val object = {
+        postId = candidate.postId,
+        authorId = candidate.authorId,
+        indexName = "1fav_video"
+      }
+      #<hydra/kafka/indexingEventKafkaTopic>.insert((), object)
+      stats.counter("1fav_video_indexing_event_created").incr(1)
+    case _ => ()
+  }
+}
+
+def build1FavReplyIndex(candidate: PhoenixRankAllCandidate, stats: Stats.StatsReceiver): Unit = {
+  val object = {
+    postId = candidate.postId,
+    authorId = candidate.authorId,
+    indexName = "1fav_reply",
+    inReplyToPostId = candidate.tweetMedadata.flatMap { tweet => eventProcessing.inReplyToPostId(tweet) }
+  }
+  #<hydra/kafka/indexingEventKafkaTopic>.insert((), object)
+  stats.counter("1fav_reply_indexing_event_created").incr(1)
+}
+
+def build32FavReplyIndex(candidate: PhoenixRankAllCandidate, stats: Stats.StatsReceiver): Unit = {
+  if (eventProcessing.hasMinFavoriteCount(candidate.engagementCount, 32L)) {
+    val object = {
+      postId = candidate.postId,
+      authorId = candidate.authorId,
+      indexName = "32fav_reply",
+      inReplyToPostId = candidate.tweetMedadata.flatMap { tweet => eventProcessing.inReplyToPostId(tweet) }
+    }
+    #<hydra/kafka/indexingEventKafkaTopic>.insert((), object)
+    stats.counter("32fav_reply_indexing_event_created").incr(1)
+  }
+}
+
+def buildPostCreationIndex(candidate: PhoenixRankAllCandidate, stats: Stats.StatsReceiver): Unit = {
+  val object = {
+    postId = candidate.postId,
+    authorId = candidate.authorId,
+    indexName = "post_creation"
+  }
+  #<hydra/kafka/indexingEventKafkaTopic>.insert((), object)
+  stats.counter("post_creation_indexing_event_created").incr(1)
+}
+
+def buildVideoIndex(candidate: PhoenixRankAllCandidate, stats: Stats.StatsReceiver): Unit = {
+  candidate.tweetMedadata match {
+    case Some(tweet) if eventProcessing.hasValidImmersiveVideo(tweet) =>
+      val object = {
+        postId = candidate.postId,
+        authorId = candidate.authorId,
+        indexName = "video"
+      }
+      #<hydra/kafka/indexingEventKafkaTopic>.insert((), object)
+      stats.counter("video_indexing_event_created").incr(1)
+    case _ => ()
+  }
+}
+
+def buildNsfwVideoIndex(candidate: PhoenixRankAllCandidate, stats: Stats.StatsReceiver): Unit = {
+  val isNsfw = eventProcessing.isNsfwPost(candidate.unifiedPostAnnotations)
+  if (isNsfw) {
+    candidate.tweetMedadata match {
+      case Some(tweet) if eventProcessing.hasValidImmersiveVideo(tweet) =>
+        val object = {
+          postId = candidate.postId,
+          authorId = candidate.authorId,
+          indexName = "nsfw_video"
+        }
+        #<hydra/kafka/indexingEventKafkaTopic>.insert((), object)
+        stats.counter("nsfw_video_indexing_event_created").incr(1)
+      case _ => ()
+    }
+  }
+}
+
+def buildImagineIndex(candidate: PhoenixRankAllCandidate, stats: Stats.StatsReceiver): Unit = {
+  candidate.tweetMedadata match {
+    case Some(tweet) if eventProcessing.isImaginePost(tweet) =>
+      val object = {
+        postId = candidate.postId,
+        authorId = candidate.authorId,
+        indexName = "imagine"
+      }
+      #<hydra/kafka/indexingEventKafkaTopic>.insert((), object)
+      stats.counter("imagine_indexing_event_created").incr(1)
+    case _ => ()
+  }
+}
+
+def buildMetadataDump(
+  candidate: PhoenixRankAllCandidate,
+  stats: Stats.StatsReceiver,
+  isReply: Boolean
+): Unit = {
+  candidate.tweetMedadata match {
+    case Some(tweet) =>
+      val hasImage = tweetUtil.hasImage(tweet)
+      val hasVideo = tweetUtil.hasVideo(tweet)
+      val videoDurationMsOpt = eventProcessing.videoDurationMs(tweet)
+      val flatObject = {
+        postId = candidate.postId,
+        authorId = candidate.authorId,
+        hasVideo = hasVideo,
+        hasImage = hasImage,
+        authorFollowersCount = candidate.authorFollowers,
+        engagementCount = candidate.engagementCount,
+        videoDurationMs = videoDurationMsOpt,
+        isReply = Some(isReply),
+      }
+      #<hydra/kafka/metadataEventKafkaTopic>.insert((), flatObject)
+      if (isReply) {
+        stats.counter("reply_metadata_dump_created").incr(1)
+      } else {
+        stats.counter("metadata_dump_created").incr(1)
+      }
+    case None => ()
+  }
+}
+
+def buildMMEmbMetadataDump(candidate: PhoenixRankAllCandidate, stats: Stats.StatsReceiver): Unit = {
+  candidate.tweetMedadata match {
+    case Some(tweet) =>
+      val hasImage = tweetUtil.hasImage(tweet)
+      val hasVideo = tweetUtil.hasVideo(tweet)
+      try {
+        val emb3Result = postMultimodalEmbeddingMhColumnV2.fetch((candidate.postId, "v3"), ())
+        val emb5Result = postMultimodalEmbeddingMhColumnV2.fetch((candidate.postId, "v5_1"), ())
+        val emb6Result = postMultimodalEmbeddingMhColumnV2.fetch((candidate.postId, "v6_dev"), ())
+        val mmEmbs = {
+          mmEmbV3 = emb3Result.v.flatMap { emb => emb.embedding1 },
+          mmEmbV5 = emb5Result.v.flatMap { emb => emb.embedding1 },
+          mmEmbV6 = emb6Result.v.flatMap { emb => emb.embedding1 }
+        }
+        val flatObject = {
+          postId = candidate.postId,
+          authorId = candidate.authorId,
+          hasVideo = hasVideo,
+          hasImage = hasImage,
+          authorFollowersCount = candidate.authorFollowers,
+          mmEmbs = Some(mmEmbs),
+          indexName = Some("mm_emb_metadata")
+        }
+        #<hydra/kafka/metadataEventKafkaTopic>.insert((), flatObject)
+        stats.counter("metadata_dump_mm_emb_created").incr(1)
+      } catch {
+        case _ =>
+          stats.counter("metadata_dump_mm_emb_fetch_error").incr(1)
+      }
+    case None => ()
+  }
+}
+
+val executeOp = Op.execute({ idempotent = true })[PhoenixRankAllIndexingRequest, Unit] { ctx =>
+  val eventSource = ctx.arg.eventSource
+
+  val receiverStats = ctx.statsReceiver.scope("phoenix_rank_all_processor").scope(eventSource.toString)
+  val numRequestsReceived = receiverStats.counter("num_requests_received")
+  val numSkippedCommunity = receiverStats.counter("num_skipped_community")
+  val numSkippedReplies = receiverStats.counter("num_skipped_replies")
+  val numSkippedSelfReplies = receiverStats.counter("num_skipped_self_replies")
+  val numSkippedFilteredReplies = receiverStats.counter("num_skipped_filtered_replies")
+  val numSkippedReposts = receiverStats.counter("num_skipped_reposts")
+  val numSkippedPosts = receiverStats.counter("num_skipped_filtered_posts")
+  val numCandidatesProcessed = receiverStats.counter("num_candidates_processed")
+  val numMissingMetadata = receiverStats.counter("num_missing_metadata")
+  val numMissingAuthorId = receiverStats.counter("num_missing_author_id")
+  val numInvalidEventSource = receiverStats.counter("num_invalid_event_source")
+
+  numRequestsReceived.incr(1)
+
+  val postId: Long = ctx.arg.postId
+  val postMetadata: Option[Tweet] = eventProcessing.getPostMetadataLightweight(postId)
+
+  postMetadata match {
+    case Some(post) =>
+      val authorId: Option[Long] = eventProcessing.getAuthorId(post)
+      authorId match {
+        case Some(id) =>
+          val unifiedPostAnnotations = eventProcessing.getUnifiedPostAnnotations(postId)
+          val engagementCount = eventProcessing.getEngagementCount(postId)
+          val authorFollowers = eventProcessing.getAuthorFollowers(post)
+          val candidate = {
+            postId = postId,
+            authorId = id,
+            eventSource = eventSource,
+            unifiedPostAnnotations = unifiedPostAnnotations,
+            tweetMedadata = postMetadata,
+            engagementCount = engagementCount,
+            authorFollowers = authorFollowers
+          }
+          val hasImmersiveVideo = eventProcessing.hasImmersiveVideo(post)
+
+          if (eventSource == EvergreenVideo) {
+            if(hasImmersiveVideo) {
+              buildEvergreenVideoIndex(candidate, receiverStats)
+              numCandidatesProcessed.incr(1)
+            }
+          } else if (eventSource == EvergreenNsfwVideo) {
+            if(hasImmersiveVideo) {
+              buildEvergreenNsfwVideoIndex(candidate, receiverStats)
+              numCandidatesProcessed.incr(1)
+            }
+          } else {
+            val isCommunityPost = eventProcessing.isCommunityPost(post)
+            val isRepost = eventProcessing.isRepost(post)
+
+            if (eventSource == Fav && !isCommunityPost && !isRepost) {
+              buildSearchUnfilteredIndex(candidate, receiverStats)
+            }
+
+            val isReply = eventProcessing.isReply(post)
+            val isAdultPost = eventProcessing.isNsfwPost(unifiedPostAnnotations)
+            val shouldDropPostByVF = eventProcessing.shouldDropPostByVF(postId)
+            val shouldDropPost = shouldDropPostByVF || isAdultPost
+            if(isCommunityPost) {
+              numSkippedCommunity.incr(1)
+            } else if (isReply) {
+              numSkippedReplies.incr(1)
+              if (eventSource == Fav) {
+                if (eventProcessing.isSelfReply(post)) {
+                  numSkippedSelfReplies.incr(1)
+                } else if (shouldDropPost) {
+                  numSkippedFilteredReplies.incr(1)
+                } else {
+                  build1FavReplyIndex(candidate, receiverStats)
+                  build32FavReplyIndex(candidate, receiverStats)
+                  buildMetadataDump(candidate, receiverStats, isReply)
+                }
+              }
+            } else if (isRepost) {
+              numSkippedReposts.incr(1)
+            } else if (shouldDropPost) {
+              if (hasImmersiveVideo && eventSource == Fav && isAdultPost) {
+                buildNsfwVideoIndex(candidate, receiverStats)
+                buildMetadataDump(candidate, receiverStats, isReply)
+                buildMMEmbMetadataDump(candidate, receiverStats)
+              } else {
+                numSkippedPosts.incr(1)
+              }
+            } else {
+              eventSource match {
+                case Fav =>
+                  build1FavIndex(candidate, receiverStats)
+                  build1FavIndexBackup(candidate, receiverStats)
+                  build1FavTopicIndex(candidate, receiverStats)
+                  build32FavIndex(candidate, receiverStats)
+                  if(hasImmersiveVideo) {
+                    buildVideoIndex(candidate, receiverStats)
+                    build1FavVideoIndex(candidate, receiverStats)
+                    buildImagineIndex(candidate, receiverStats)
+                  }
+                  buildMetadataDump(candidate, receiverStats, isReply)
+                  buildMMEmbMetadataDump(candidate, receiverStats)
+                case PostCreation =>
+                  buildPostCreationIndex(candidate, receiverStats)
+                  if(hasImmersiveVideo) {
+                    buildVideoIndex(candidate, receiverStats)
+                  }
+                  buildMetadataDump(candidate, receiverStats, isReply)
+                case _ =>
+                  numInvalidEventSource.incr(1)
+              }
+              numCandidatesProcessed.incr(1)
+            }
+          }
+        case None =>
+          numMissingAuthorId.incr(1)
+      }
+    case None =>
+      numMissingMetadata.incr(1)
+  }
+  Ok
+}
+
+val accessPolicy = AllowAll
+
+Managed({
+  source = QueryColumn({ ops = Map(Execute -> executeOp) }),
+  contactInfo = Some(sharedConfig.contactInfo),
+  lifecycle = Production,
+  description = PlainText(
+    """
+    Receives post ids to trigger the generation of phoenix rank all indexing event
+    """
+  ),
+  accessPolicy = accessPolicy
+})

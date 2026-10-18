@@ -1,0 +1,100 @@
+package com.twitter.simclusters_v2.scalding.topic_recommendations
+import com.twitter.bijection.Bufferable
+import com.twitter.bijection.Injection
+import com.twitter.scalding._
+import com.twitter.simclusters_v2.common.Country
+import com.twitter.simclusters_v2.common.Language
+import com.twitter.simclusters_v2.common.SemanticCoreEntityId
+import com.twitter.simclusters_v2.common.TopicId
+import com.twitter.simclusters_v2.common.UserId
+import com.twitter.simclusters_v2.scalding.common.matrix.SparseMatrix
+import com.twitter.simclusters_v2.scalding.embedding.common.EmbeddingUtil.ProducerId
+import com.twitter.simclusters_v2.thriftscala.UserAndNeighbors
+
+object TopicsForProducersUtils {
+
+  implicit val sparseMatrixInj: Injection[
+    (SemanticCoreEntityId, Option[Language], Option[Country]),
+    Array[Byte]
+  ] =
+    Bufferable.injectionOf[(SemanticCoreEntityId, Option[Language], Option[Country])]
+
+  def getValidTopics(
+    topicUsers: TypedPipe[((TopicId, Option[Language], Option[Country]), UserId, Double)],
+    minTopicFollowsThreshold: Int
+  )(
+    implicit uniqueID: UniqueID
+  ): TypedPipe[(TopicId, Option[Language], Option[Country])] = {
+    val numValidTopics = Stat("num_valid_topics")
+    SparseMatrix(topicUsers).rowNnz.collect {
+      case (topicsWithLocaleKey, numFollows) if numFollows >= minTopicFollowsThreshold =>
+        numValidTopics.inc()
+        topicsWithLocaleKey
+    }
+  }
+
+  def getValidProducers(
+    userToFollowersEdges: TypedPipe[(UserId, UserId, Double)],
+    minNumUserFollowers: Int
+  )(
+    implicit uniqueID: UniqueID
+  ): TypedPipe[ProducerId] = {
+    val numProducersForTopics = Stat("num_producers_for_topics")
+    SparseMatrix(userToFollowersEdges).rowL1Norms.collect {
+      case (userId, l1Norm) if l1Norm >= minNumUserFollowers =>
+        numProducersForTopics.inc()
+        userId
+    }
+  }
+
+  def getFollowedTopicsToUserSparseMatrix(
+    followedTopicsToUsers: TypedPipe[(TopicId, UserId)],
+    userCountryAndLanguage: TypedPipe[(UserId, (Country, Language))],
+    userLanguages: TypedPipe[(UserId, Seq[(Language, Double)])],
+    minTopicFollowsThreshold: Int
+  )(
+    implicit uniqueID: UniqueID
+  ): SparseMatrix[(TopicId, Option[Language], Option[Country]), UserId, Double] = {
+    val localeTopicsWithUsers: TypedPipe[
+      ((TopicId, Option[Language], Option[Country]), UserId, Double)
+    ] =
+      followedTopicsToUsers
+        .map { case (topic, user) => (user, topic) }
+        .join(userCountryAndLanguage)
+        .join(userLanguages)
+        .withDescription("joining user locale information")
+        .flatMap {
+          case (user, ((topic, (country, _)), scoredLangs)) =>
+            scoredLangs.flatMap {
+              case (lang, score) =>
+                Seq(
+                  ((topic, Some(lang), Some(country)), user, score),
+                  ((topic, Some(lang), None), user, score)
+                )
+            } ++ Seq(((topic, None, None), user, 1.0))
+        }
+    SparseMatrix(localeTopicsWithUsers).filterRowsByMinSum(minTopicFollowsThreshold)
+  }
+
+  def getProducersToFollowedByUsersSparseMatrix(
+    userUserGraph: TypedPipe[UserAndNeighbors],
+    minActiveFollowers: Int,
+  )(
+    implicit uniqueID: UniqueID
+  ): SparseMatrix[ProducerId, UserId, Double] = {
+
+    val numEdgesFromUsersToFollowers = Stat("num_edges_from_users_to_followers")
+
+    val userToFollowersEdges: TypedPipe[(UserId, UserId, Double)] =
+      userUserGraph
+        .flatMap { userAndNeighbors =>
+          userAndNeighbors.neighbors
+            .collect {
+              case neighbor if neighbor.isFollowed.getOrElse(false) =>
+                numEdgesFromUsersToFollowers.inc()
+                (neighbor.neighborId, userAndNeighbors.userId, 1.0)
+            }
+        }
+    SparseMatrix(userToFollowersEdges).filterRowsByMinSum(minActiveFollowers)
+  }
+}

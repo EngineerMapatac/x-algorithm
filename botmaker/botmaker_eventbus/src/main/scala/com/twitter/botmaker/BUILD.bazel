@@ -1,0 +1,16 @@
+scala_library(
+    name = "botmaker",
+    dependencies = [
+        "3rdparty/jvm/com/google/guava",
+        "botmaker/src/java/com/twitter/botmaker",
+        "botmaker/src/scala/com/twitter/botmaker",
+        "botmaker/src/thrift/com/twitter/botmaker/runtime:runtime-java",
+        "eventbus/client/src/main/scala/com/twitter/eventbus/client",
+        "finatra-internal/kafka/src/main/scala/com/twitter/finatra/kafka/consumers",
+        "finatra-internal/kafka/src/main/scala/com/twitter/finatra/kafka/producers",
+        "kafka/finagle-kafka/finatra-kafka/src/main/scala",
+    ],
+    platform = "java8",
+    sources = ["**/*.scala"],
+    tags = ["bazel-compatible"],
+)

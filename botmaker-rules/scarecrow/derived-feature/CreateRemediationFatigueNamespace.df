@@ -1,0 +1,4 @@
+description:\nexpression: |
+  Concat(RemediationFatigueLabel, "_", ToString(RULE_ID))
+logged: 'false'
+returnType: StrValue

@@ -1,0 +1,17 @@
+description:\nexpression: |
+  params(Long :userId)
+  {
+    val :user = GetUser(:userId);
+    Assert(:user != NULL, Concat("error fetching user w/ id: ", ToString(:userId)));
+    if (:user.labels != NULL && :user.labels.labels != NULL) {
+      ToSet(
+        flatmap(:label in :user.labels.labels) {
+          Set(:label.label_value)
+        }
+      )
+    } else {
+      EmptyStringSet
+    }
+  }
+logged: 'false'
+returnType: StrSetValue

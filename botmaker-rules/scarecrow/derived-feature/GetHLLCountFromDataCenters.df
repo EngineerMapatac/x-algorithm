@@ -1,0 +1,13 @@
+description:\nexpression: |
+  param(String :namespace, String :topic, String :id, Long :lookbackSecs, Long :precisionSecs, Long :cacheTtlSecs, Long :sliceNumber)
+
+  {
+    val :ns = List(
+        Join(".", "atla", :namespace),
+        Join(".", "pdxa", :namespace));
+
+    GetHLLCount(:ns, :topic, :id, :lookbackSecs, :precisionSecs, :cacheTtlSecs, :sliceNumber);
+
+  }
+logged: 'false'
+returnType: LongValue

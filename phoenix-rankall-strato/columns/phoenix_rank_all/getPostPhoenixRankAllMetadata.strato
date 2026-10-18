@@ -1,0 +1,47 @@
+import <hydra/sharedConfig>
+import <hydra/eventProcessing>
+import <content_understanding/tweetUtil>
+
+type Post = com.twitter.tweetypie.Tweet
+type UnifiedPostAnnotations = com.twitter.strato.columns.content_understanding.UnifiedPostAnnotations
+type EngagementCount = com.twitter.strato.columns.hydra.EngagementCount
+type PhoenixRankAllCandidateFlat = com.twitter.strato.columns.hydra.PhoenixRankAllCandidateFlat
+
+val executeOp = Op.execute({ idempotent = true })[Long, Option[PhoenixRankAllCandidateFlat]] { ctx =>
+  val postId: Long = ctx.arg
+  val postMetadata: Option[Post] = eventProcessing.getPostMetadataLightweight(postId)
+  postMetadata match {
+    case Some(post) =>
+      val authorId: Option[Long] = eventProcessing.getAuthorId(post)
+      val unifiedPostAnnotations = eventProcessing.getUnifiedPostAnnotations(postId)
+      val engagementCount = eventProcessing.getEngagementCount(postId)
+      val authorFollowers = eventProcessing.getAuthorFollowers(post)
+      val hasImage = tweetUtil.hasImage(post)
+      val hasVideo = tweetUtil.hasVideo(post)
+      Ok(Some({
+        postId = postId,
+        authorId = authorId.getOrElse(-1),
+        hasVideo = hasVideo,
+        hasImage = hasImage,
+        authorFollowersCount = authorFollowers,
+        engagementCount = engagementCount,
+        postAnnotations = unifiedPostAnnotations
+      }))
+    case _ =>
+      Ok(None)
+  }
+}
+
+val accessPolicy = AllowAll
+
+Managed({
+  source = QueryColumn({ ops = Map(Execute -> executeOp) }),
+  contactInfo = Some(sharedConfig.contactInfo),
+  lifecycle = Production,
+  description = PlainText(
+    """
+    Receives post id and return PhoenixRankAllCandidateFlat
+    """
+  ),
+  accessPolicy = accessPolicy
+})

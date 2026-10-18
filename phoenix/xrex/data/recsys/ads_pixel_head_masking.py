@@ -1,0 +1,103 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 X.AI Corp.
+import numpy as np
+import numpy.typing as npt
+
+from xai_proto import recsys_pb2
+
+_A = recsys_pb2.ActionName
+
+ELIGIBLE_TYPES_KNOWN = np.uint64(1)
+
+SITE_VISIT = 1
+PURCHASE = 2
+DOWNLOAD = 3
+SIGN_UP = 4
+CUSTOM = 5
+ADD_TO_CART = 12
+ADD_TO_WISHLIST = 13
+CHECKOUT_INITIATED = 15
+SEARCH = 16
+CONTENT_VIEW = 19
+ADDED_PAYMENT_INFO = 22
+COMPLETE_REGISTRATION = 26
+SUBSCRIBE = 27
+START_TRIAL = 28
+PRODUCT_CUSTOMIZATION = 29
+SESSION = 30
+LANDING_PAGE_VIEW = 31
+
+UPPER_FUNNEL_TYPES = (SITE_VISIT, SESSION, LANDING_PAGE_VIEW)
+MID_FUNNEL_TYPES = (
+    SIGN_UP,
+    ADD_TO_CART,
+    ADD_TO_WISHLIST,
+    CHECKOUT_INITIATED,
+    SEARCH,
+    CONTENT_VIEW,
+    ADDED_PAYMENT_INFO,
+    COMPLETE_REGISTRATION,
+    SUBSCRIBE,
+    PRODUCT_CUSTOMIZATION,
+)
+
+HEAD_CONVERSION_TYPES: dict[int, tuple[int, ...]] = {
+    _A.ADS_SITE_VISIT_CONVERSION: (SITE_VISIT,),
+    _A.ADS_SITE_VISIT_CONVERSION_VIEW_THROUGH: (SITE_VISIT,),
+    _A.ADS_PURCHASE_CONVERSION: (PURCHASE,),
+    _A.ADS_PURCHASE_CONVERSION_VIEW_THROUGH: (PURCHASE,),
+    _A.ADS_PURCHASE_CONVERSION_DELAYED: (PURCHASE,),
+    _A.ADS_DOWNLOAD_CONVERSION: (DOWNLOAD,),
+    _A.ADS_SIGN_UP_CONVERSION: (SIGN_UP,),
+    _A.ADS_SIGN_UP_CONVERSION_VIEW_THROUGH: (SIGN_UP,),
+    _A.ADS_SIGN_UP_CONVERSION_DELAYED: (SIGN_UP,),
+    _A.ADS_CUSTOM_CONVERSION: (CUSTOM,),
+    _A.ADS_ADD_TO_CART_CONVERSION: (ADD_TO_CART,),
+    _A.ADS_ADD_TO_CART_CONVERSION_VIEW_THROUGH: (ADD_TO_CART,),
+    _A.ADS_ADD_TO_CART_CONVERSION_DELAYED: (ADD_TO_CART,),
+    _A.ADS_ADD_TO_WISHLIST_CONVERSION: (ADD_TO_WISHLIST,),
+    _A.ADS_CHECKOUT_INITIATED_CONVERSION: (CHECKOUT_INITIATED,),
+    _A.ADS_CHECKOUT_INITIATED_CONVERSION_VIEW_THROUGH: (CHECKOUT_INITIATED,),
+    _A.ADS_CHECKOUT_INITIATED_CONVERSION_DELAYED: (CHECKOUT_INITIATED,),
+    _A.ADS_SEARCH_CONVERSION: (SEARCH,),
+    _A.ADS_SEARCH_CONVERSION_DELAYED: (SEARCH,),
+    _A.ADS_CONTENT_VIEW_CONVERSION: (CONTENT_VIEW,),
+    _A.ADS_ADDED_PAYMENT_INFO_CONVERSION: (ADDED_PAYMENT_INFO,),
+    _A.ADS_COMPLETE_REGISTRATION_CONVERSION: (COMPLETE_REGISTRATION,),
+    _A.ADS_SUBSCRIBE_CONVERSION: (SUBSCRIBE,),
+    _A.ADS_START_TRIAL_CONVERSION: (START_TRIAL,),
+    _A.ADS_PRODUCT_CUSTOMIZATION_CONVERSION: (PRODUCT_CUSTOMIZATION,),
+    _A.ADS_SESSION_CONVERSION: (SESSION,),
+    _A.ADS_SESSION_CONVERSION_VIEW_THROUGH: (SESSION,),
+    _A.ADS_LANDING_PAGE_VIEW_CONVERSION: (LANDING_PAGE_VIEW,),
+    _A.ADS_LANDING_PAGE_VIEW_CONVERSION_VIEW_THROUGH: (LANDING_PAGE_VIEW,),
+    _A.ADS_MID_FUNNEL_CONVERSION: MID_FUNNEL_TYPES,
+    _A.ADS_MID_FUNNEL_CONVERSION_DELAYED: MID_FUNNEL_TYPES,
+    _A.ADS_UPPER_FUNNEL_CONVERSION: UPPER_FUNNEL_TYPES,
+    _A.ADS_UPPER_FUNNEL_CONVERSION_VIEW_THROUGH: UPPER_FUNNEL_TYPES,
+    _A.ADS_UPPER_FUNNEL_CONVERSION_DELAYED: UPPER_FUNNEL_TYPES,
+}
+
+
+def head_type_bits(num_actions: int) -> npt.NDArray[np.uint64]:
+    bits = np.zeros(num_actions, dtype=np.uint64)
+    for head, types in HEAD_CONVERSION_TYPES.items():
+        if head < num_actions:
+            for t in types:
+                bits[head] |= np.uint64(1) << np.uint64(t)
+    return bits
+
+
+def build_head_eligible_mask(
+    actions: npt.NDArray[np.bool_],
+    eligible_types: npt.NDArray[np.uint64] | None,
+) -> npt.NDArray[np.bool_]:
+    actions = actions.astype(np.bool_, copy=False)
+    if eligible_types is None:
+        return np.ones(actions.shape, dtype=np.bool_)
+    rows, num_candidates, num_actions = actions.shape
+    bits = np.asarray(eligible_types, dtype=np.uint64).reshape(rows, num_candidates, 1)
+    type_bits = head_type_bits(num_actions)[None, None, :]
+    unknown = (bits & ELIGIBLE_TYPES_KNOWN) == 0
+    active = (bits & type_bits) != 0
+    return unknown | (type_bits == 0) | active | actions

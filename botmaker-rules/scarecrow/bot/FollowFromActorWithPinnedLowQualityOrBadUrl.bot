@@ -1,0 +1,50 @@
+id: '20732'
+description:\nevent: follow
+condition: |
+  Exists(spammerId) &&
+  !IsTestUser(spammerId) &&
+  {
+    val :pinnedTweets = GetUserPinnedTweetIds(spammerId);
+    Any(
+      :pinnedTweet,
+      {
+        val :pinnedTweetId = ToLong(:pinnedTweet);
+        :pinnedTweetId != NULL &&
+        :pinnedTweetId != "" &&
+        IsTweetFound(:pinnedTweetId) &&
+        {
+          val :urls = GetUrls(GetTweetText(:pinnedTweetId));
+          Length(:urls) > 0 &&
+          Any(
+            :verdict,
+            {
+              val :v = GetMapValue(:verdict, "verdict");
+              :v == "BAD" || :v == "LOW_QUALITY"
+            },
+            ToList(GetMapValues(GetReputationV2(GetUrlResolutions(:urls))))
+          )
+        }
+      },
+      :pinnedTweets
+    )
+  } &&
+  !IsHighPageRankUser(spammerId) &&
+  !Contains(GetLongList(`AutoExpiringTempSkipList`), spammerId) &&
+  !IsUserGrayVerified(spammerId)
+action: |
+  {
+    AddTwitterSupportGuanoNote(
+      spammerId,
+      "User pinned a LOW_QUALITY or BAD url/domain to his/her profile. Restricting notifications."
+    );
+    SetUserLabel(
+      spammerId,
+      "SPAM_HIGH_RECALL",
+      "[bot/20732] FollowFromActorWithPinnedLowQualityOrBadUrl",
+      CurrentTimeMs() + (OneWeekInSecs * 1000)
+    );
+    Log(Concat("Bot", RULE_ID, "_SetUserLabel"), spammerId);
+  }
+expiry: '2027-06-01T21:00:00Z'
+isActive: 'true'
+owner:\nactionLimits: {}

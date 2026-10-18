@@ -1,0 +1,4 @@
+description:\nexpression: |
+  "bq_to_bm_namespace"
+logged: 'false'
+returnType: StrValue

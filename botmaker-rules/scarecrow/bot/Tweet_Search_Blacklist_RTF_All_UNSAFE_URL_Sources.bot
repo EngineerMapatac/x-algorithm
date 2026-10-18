@@ -1,0 +1,64 @@
+id: '20789'
+description:\nevent: url_event
+condition: |
+  Exists(tweetId) &&
+  Exists(redirectionChain) && Count(redirectionChain) > 0 &&
+  GetUrlVerdictForSingleChain(redirectionChain) MATCHES ".*UNSAFE" &&
+  with (
+    :authorId =
+      if (Exists(originalTweetId)
+        && originalTweetId != 0
+        && originalTweetId != tweetId) {
+        ToLong(GetMapValue(GetTweetInfo(originalTweetId), "user_id"))
+      } else {
+        tcoUserId
+      }
+  ) {
+    !IsTestUser(:authorId) &&
+    !IsHighPageRankUser(:authorId) &&
+    !Contains(GetLongList(`AutoExpiringTempSkipList`), :authorId) &&
+    !IsUserGrayVerified(:authorId)
+  }
+action: |
+  with (
+    :activeTweetId =
+      if (Exists(originalTweetId) && originalTweetId != 0) {  originalTweetId }
+      else { tweetId },
+    :sbLabel = "searchBlacklist",
+    :dnaLabel = "doNotAmplify",
+    :unsafeLabel = "unsafeUrl",
+    :verdict = GetUrlVerdictForSingleChain(redirectionChain)
+  ) {
+    DoAsync(
+      if (:verdict MATCHES "UNSAFE") {
+        if (!Contains(GetTweetRtfLabels(:activeTweetId), "SEARCH_BLACKLIST")) {
+          TweetRtfApplyLabel("SEARCH_BLACKLIST", :activeTweetId);
+          Log(Join("_", "url", "async", "tweet", :sbLabel, "20789"), "1");
+          IncrementStat(Join("_", "url_async_tweet", :sbLabel, "20789"), 1);
+          AddGuanoNote(spammerId, TwitterSafetyUserId, Join(" ", "go/bot/20789 labeled as SEARCH_BLACKLIST Tweet Id ", ToString(tweetId)));
+        }
+        if (!Contains(GetTweetRtfLabels(:activeTweetId), "UNSAFE_URL")) {
+          TweetRtfApplyLabel("UNSAFE_URL", :activeTweetId);
+          Log(Join("_", "url", "async", "tweet", :unsafeLabel, "20789"), "1");
+          IncrementStat(Join("_", "url_async_tweet", :unsafeLabel, "20789"), 1);
+          AddGuanoNote(spammerId, TwitterSafetyUserId, Join(" ", "go/bot/20789 labeled as UNSAFE_URL Tweet Id ", ToString(tweetId)));
+        }
+        if (!Contains(GetTweetRtfLabels(:activeTweetId), "DO_NOT_AMPLIFY")) {
+          TweetRtfApplyLabel("DO_NOT_AMPLIFY", :activeTweetId);
+          Log(Join("_", "url", "async", "tweet", :dnaLabel, "20789"), "1");
+          IncrementStat(Join("_", "url_async_tweet", :dnaLabel, "20789"), 1);
+          AddGuanoNote(spammerId, TwitterSafetyUserId, Join(" ", "go/bot/20789 labeled as DO_NOT_AMPLIFY Tweet Id ", ToString(tweetId)));
+        }
+        if (!Contains(GetTweetRtfLabels(:activeTweetId), "MALICIOUS_URL")) {
+          TweetRtfApplyLabel("MALICIOUS_URL", :activeTweetId);
+          Log(Join("_", "url", "async", "tweet", :dnaLabel, "20789"), "1");
+          IncrementStat(Join("_", "url_async_tweet", :dnaLabel, "20789"), 1);
+          AddGuanoNote(spammerId, TwitterSafetyUserId, Join(" ", "go/bot/20789 labeled as MALICIOUS_URL Tweet Id ", ToString(tweetId)));
+        }
+        IncrementStat("url_event_catches/tweet/20789", 1);
+      }
+    );
+  }
+expiry: +292278994-08-17T07:12:55.807Z
+isActive: 'true'
+owner:\nactionLimits: {}

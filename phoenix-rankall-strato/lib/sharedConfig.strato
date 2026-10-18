@@ -1,0 +1,23 @@
+val contactInfo = {
+  contactEmail = "hydra-eng@twitter.com",
+  ldapGroup = "hydra-admins",
+  jiraProject = "SD",
+  slackRoomId = "project-hydra"
+}
+
+val adminPolicy = AnyOf({
+  policies = Seq(
+    Has({ principal = LdapGroup({ id = "hydra-admins" }) }),
+    ServiceIdentifierPattern({ role = "timelines", env = "*", service = "*", zone = Seq("all") })
+  )
+})
+
+Library({
+  export = {
+    contactInfo = contactInfo,
+    adminPolicy = adminPolicy
+  },
+  description = PlainText("Common config for Hydra Streaming columns"),
+  contactInfo = contactInfo,
+  lifecycle = Production,
+})

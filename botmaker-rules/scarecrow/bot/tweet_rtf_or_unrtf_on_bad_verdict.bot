@@ -1,0 +1,41 @@
+id: '2002'
+description:\nevent: url_reputation_change
+condition: |
+  Exists(verdict) && verdict == "BAD" &&
+  (action == "PUT" || action == "DELETE")
+action: |
+  {
+    val :tcos = GetSlugsForUrl(entity, ToLong(ToString(matchingType)));
+    val :badTcos =
+      Filter(
+        :slug,
+        {
+          val :resolutionChain = GetUrlResolutionChains(Set(:slug));
+          val :map = GetUrlVerdictForSingleChainV2(Flatten(GetMapValues(:resolutionChain)));
+          val :verdict = TryOrElse(GetMapValue(:map, "verdict"), "no");
+          if(action == "PUT"){
+            Contains(:verdict, "BAD") && !Contains(:verdict, "WHITELIST") && !Contains(:verdict, "GOOD")
+          } else if(action == "DELETE"){
+            !Contains(:verdict, "BAD")
+          }
+        },
+        :tcos
+      );
+    val :ids = for (:t in :badTcos) { Last(SplitString(:t, "/")) };
+    val :tweetIds = GetTweetIdsForSlugs(:ids);
+    if (Length(:tweetIds) != 0) {
+      IncrementStat(Join("/", "URLBlacklistBackfill", "Any"), Length(:tweetIds));
+      IncrementStat(Join("/", "URLBlacklistBackfill", action), Length(:tweetIds));
+      for(:tweetId in :tweetIds) {
+        if (action == "PUT") {
+          TweetRtfApplyLabel("SPAM", :tweetId);
+        } else {
+          TweetRtfRemoveLabel("SPAM", :tweetId);
+        };
+      };
+      Log("TweetIds with RTF Action", Join("\t", "SPAM", action, ToString(:tweetIds)));
+    }
+  }
+expiry: +292278994-08-17T07:12:55.807Z
+isActive: 'true'
+owner:\nactionLimits: {}

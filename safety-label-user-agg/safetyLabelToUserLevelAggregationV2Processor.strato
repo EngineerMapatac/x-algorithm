@@ -1,0 +1,137 @@
+import <content_understanding/tweetUtil>
+import <safety_understanding/postToUserLabelRules>
+import <safety_understanding/utils>
+
+val content_understanding_log_index = "content_understanding_strato"
+
+type Tweet = com.twitter.tweetypie.Tweet
+type Event = com.twitter.spam.rtf.TweetSafetyLabelEvent
+
+val gizmoduckSetUserLabelsColumn = #<hmli/gizmoduckSetUserLabels>
+
+val executeOp = Op.execute({ idempotent = true })[Event, Unit] { ctx =>
+  val stats = ctx.statsReceiver
+  ctx.arg match {
+    case {
+      actionType = actionType,
+      labelType = labelType,
+      tweetId = tweetId,
+    } if actionType == Applied =>
+      val config = postToUserLabelRules.parseConfig(postToUserLabelRules.configuredRulesJson())
+      val validRules = postToUserLabelRules.validRules(config.rules)
+      if (validRules.isEmpty) {
+        stats.counter("invalid_post_to_user_label_rules").incr(1)
+      }
+      val eventLabel = Thrift.labelOfEnum(labelType)
+      val triggeredRules = postToUserLabelRules.triggeredRules(validRules, eventLabel, tweetId)
+
+      if (triggeredRules.nonEmpty) {
+        val _ = #Tweet<tweetypie/federated/pureCoreData>.fetch(tweetId, ()).v.map { coreData => coreData.user }.map {
+          userId =>
+            val (userOpt, isHighPageRank, isGreyBadge) = (
+              #User<gizmoduck/composite>.fetch(userId, ({ includeProtected = true }, Set(Safety, Labels))).v,
+              #User<platform-manipulation/isHighPageRankV2>
+                .fetch(userId, ())
+                .v
+                .map { info => info.isHighPageRankUser }
+                .getOrElse(false),
+              #User<platform-manipulation/isGreyBadge>.fetch(userId, ()).v.getOrElse(false),
+            )
+
+            val userContext = {
+              nsfwUser = userOpt.map { user =>
+                user.safety.map { safety => safety.nsfwUser }.getOrElse(false)
+              }.getOrElse(false),
+              nsfwAdmin = userOpt.map { user =>
+                user.safety.map { safety => safety.nsfwAdmin }.getOrElse(false)
+              }.getOrElse(false),
+              highPageRankOrGreyBadge = isHighPageRank || isGreyBadge,
+              userLabels = userOpt.map { user =>
+                user.labels.map { labels =>
+                  labels.labels.map { label => Thrift.labelOfEnum(label.labelValue) }.toSet
+                }.getOrElse(Set.empty)
+              }.getOrElse(Set.empty)
+            }
+
+            val eligibleRules = triggeredRules.filter { rule =>
+              !postToUserLabelRules.isExcluded(rule, userContext)
+            }
+            val fetchPostCount = postToUserLabelRules.maxScanSize(eligibleRules)
+            val checkMedia = postToUserLabelRules.needsMediaLookup(eligibleRules)
+            val postLabelData = if (fetchPostCount > 0) {
+              #<profile/timelines/userTimeline/edgeBySource>.paginate(Begin({
+                source = #User(userId),
+                limit = fetchPostCount,
+                startAt = None,
+                direction = Descending
+              })).data.map { edge => edge.to }.map { postId =>
+                val originalPostId = tweetUtil.originalTweetForRetweet(postId)
+                val labels = #<visibility/baseTweetSafetyLabelMap>
+                  .fetch(originalPostId, ())
+                  .v
+                  .map { value => value.labels.getOrElse(Map.empty).keys.toSet }
+                  .getOrElse(Set.empty)
+                val hasMedia = if (checkMedia) {
+                  utils.postOrQuotedPostHasMedia(originalPostId)
+                } else {
+                  false
+                }
+                {
+                  tweetId = postId,
+                  labels = labels,
+                  hasMedia = hasMedia
+                }
+              }
+            } else {
+              Seq.empty
+            }
+
+            val outputs = postToUserLabelRules.matchingOutputs(eligibleRules, postLabelData)
+            if (outputs.nonEmpty) {
+              val currentTime = Time.now.inMillis
+              val labels = outputs.map { output =>
+                {
+                  id = 0L,
+                  labelValue = output.labelValue,
+                  createdAtMsec = currentTime,
+                  expiresAtMsec = if (output.ttlDays > 0) {
+                    Some(currentTime + output.ttlDays.days.inMillis)
+                  } else {
+                    None
+                  },
+                  byUser = "Grox",
+                  source = Some("Grox")
+                }
+              }
+              gizmoduckSetUserLabelsColumn.put(userId, labels)
+              LogIndex.info(
+                content_understanding_log_index,
+                "Config-driven safety label user aggregation" +
+                  " User: " + userId.toString +
+                  " Post: " + tweetId.toString +
+                  " Labels: " + labels.map { label => Thrift.labelOfEnum(label.labelValue) }.mkString(",")
+              )
+            }
+            ()
+        }
+        ()
+      }
+      Ok
+    case _ => Ok
+  }
+}
+
+val accessPolicy = AnyOf(Seq(
+  Has(FromStreamForwarder("safety/safetyLabelToUserLevelAggregationV2Forwarder")),
+))
+
+Managed({
+  source = QueryColumn({ ops = Map(Execute -> executeOp) }),
+  lifecycle = Production,
+  description = PlainText(
+    """
+    Applies config-driven user labels from post safety label aggregation rules.
+    """
+  ),
+  accessPolicy = accessPolicy
+})

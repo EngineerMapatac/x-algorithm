@@ -1,0 +1,287 @@
+scala_library(
+    name = "fav_graph",
+    dependencies = [
+        "agatha/src/main/scala/com/twitter/agatha/scalding/data:data_loader",
+        "src/scala/com/twitter/scalding_internal/dalv2",
+        "twadoop_config/configuration/log_categories/group/timeline:timeline_service_favorites-scala",
+    ],
+    platform = "java8",
+    sources = [
+        "FavGraphDataLoader.scala",
+    ],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)
+
+scala_library(
+    name = "faved_tweets",
+    dependencies = [
+        "3rdparty/src/jvm/com/twitter/scalding:thrift-macros",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/data:data_loader",
+        "src/scala/com/twitter/scalding_internal/dalv2",
+        "twadoop_config/configuration/log_categories/group/timeline:timeline_service_favorites-scala",
+    ],
+    platform = "java8",
+    sources = [
+        "FavedTweetsDataLoader.scala",
+    ],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)
+
+scala_library(
+    name = "edge_source",
+    dependencies = [
+        "agatha/src/main/scala/com/twitter/agatha/scalding/data:data_loader",
+        "src/protobuf/com/twitter/twadoop",
+        "src/scala/com/twitter/scalding_internal/dalv2",
+    ],
+    platform = "java8",
+    sources = [
+        "MostRecentEdgeSourceDataLoader.scala",
+    ],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)
+
+scala_library(
+    name = "flock_belongs_to_group",
+    dependencies = [
+        ":edge_source",
+        "graphstore/common:flock_belongs_to_group-java",
+    ],
+    platform = "java8",
+    sources = [
+        "ListMembershipGraphDataLoader.scala",
+    ],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)
+
+scala_library(
+    name = "flock_blocks",
+    dependencies = [
+        ":edge_source",
+        "graphstore/common:flock_blocks-java",
+    ],
+    platform = "java8",
+    sources = [
+        "BlockGraphDataLoader.scala",
+    ],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)
+
+scala_library(
+    name = "flock_contributors",
+    dependencies = [
+        ":edge_source",
+        "graphstore/common:flock_contributors-java",
+    ],
+    platform = "java8",
+    sources = [
+        "ContributorGraphDataLoader.scala",
+    ],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)
+
+scala_library(
+    name = "flock_follows",
+    dependencies = [
+        ":edge_source",
+        "graphstore/common:flock_follows-java",
+    ],
+    platform = "java8",
+    sources = [
+        "FollowGraphDataLoader.scala",
+    ],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)
+
+scala_library(
+    name = "flock_mute",
+    dependencies = [
+        ":edge_source",
+        "graphstore/common:flock_mute-java",
+    ],
+    platform = "java8",
+    sources = [
+        "MuteGraphDataLoader.scala",
+    ],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)
+
+scala_library(
+    name = "flock_report_as_abuse",
+    dependencies = [
+        ":edge_source",
+        "graphstore/common:flock_report_as_abuse-java",
+    ],
+    platform = "java8",
+    sources = [
+        "AbuseReportGraphDataLoader.scala",
+    ],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)
+
+scala_library(
+    name = "flock_subscribes_to_group",
+    dependencies = [
+        ":edge_source",
+        "graphstore/common:flock_subscribes_to_group-java",
+    ],
+    platform = "java8",
+    sources = [
+        "ListFollowerGraphDataLoader.scala",
+    ],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)
+
+scala_library(
+    name = "tweet_author_engagement_graph",
+    dependencies = [
+        "3rdparty/src/jvm/com/twitter/scalding:thrift-macros",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/data:data_loader",
+        "src/scala/com/twitter/scalding_internal/dalv2",
+        "tweetsource/common:unhydrated_flat-scala",
+    ],
+    platform = "java8",
+    sources = [
+        "TweetAuthorEngagementGraph.scala",
+    ],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)
+
+scala_library(
+    name = "retweeted_tweets",
+    dependencies = [
+        "3rdparty/src/jvm/com/twitter/scalding:thrift-macros",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/data:data_loader",
+        "src/scala/com/twitter/scalding_internal/dalv2",
+        "tweetsource/common:unhydrated_flat-scala",
+    ],
+    platform = "java8",
+    sources = [
+        "RetweetedTweetsDataLoader.scala",
+    ],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)
+
+scala_library(
+    name = "hashtag_features",
+    dependencies = [
+        "3rdparty/src/jvm/com/twitter/scalding:thrift-macros",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/data:data_loader",
+        "src/scala/com/twitter/scalding_internal/dalv2",
+        "tweetsource/common:unhydrated_flat-scala",
+    ],
+    platform = "java8",
+    sources = [
+        "HashtagTweetsDataLoader.scala",
+    ],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)
+
+scala_library(
+    name = "combined_user",
+    dependencies = [
+        "agatha/src/main/scala/com/twitter/agatha/scalding/data:data_loader",
+        "src/java/com/twitter/search/common/util/text",
+        "src/scala/com/twitter/geoduck/netutils",
+        "src/scala/com/twitter/scalding_internal/dalv2",
+        "src/thrift/com/twitter/twadoop/user/gen:gen-scala",
+        "usersource/snapshot/src/main/scala/com/twitter/usersource/snapshot/combined:usersource-scala",
+    ],
+    platform = "java8",
+    sources = [
+        "CombinedUserDataLoader.scala",
+    ],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)
+
+scala_library(
+    name = "legit_tattles_graph",
+    dependencies = [
+        "3rdparty/src/jvm/com/twitter/scalding:thrift-macros",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/data:data_loader",
+        "src/scala/com/twitter/scalding_internal/dalv2",
+        "src/scala/com/twitter/spam/scalding/datasets:tattle_events-scala",
+    ],
+    platform = "java8",
+    sources = [
+        "LegitTattleGraphDataLoader.scala",
+    ],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)
+
+scala_library(
+    name = "non_legit_tattles_no_blocks_graph",
+    dependencies = [
+        "3rdparty/src/jvm/com/twitter/scalding:thrift-macros",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/data:data_loader",
+        "src/scala/com/twitter/scalding_internal/dalv2",
+        "src/scala/com/twitter/spam/scalding/datasets:tattle_events-scala",
+        "src/thrift/com/twitter/spam:spam-scala",
+    ],
+    platform = "java8",
+    sources = [
+        "NonLegitTattlesNoBlocksGraphDataLoader.scala",
+    ],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)
+
+scala_library(
+    name = "direct_message_graph",
+    dependencies = [
+        "3rdparty/src/jvm/com/twitter/scalding:thrift-macros",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/data:data_loader",
+        "health-seh/src/main/scala/com/twitter/health_seh/jobs/dm_participants",
+        "health-seh/src/main/thrift/com/twitter/health_seh/jobs/dm_participants:dm_participants-scala",
+        "src/scala/com/twitter/botmaker/util",
+        "src/scala/com/twitter/scalding_internal/dalv2",
+        "src/scala/com/twitter/scalding_internal/job",
+    ],
+    platform = "java8",
+    sources = [
+        "DirectMessageGraphDataLoader.scala",
+    ],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)
+
+scala_library(
+    name = "all_loaders",
+    dependencies = [
+        ":combined_user",
+        ":direct_message_graph",
+        ":fav_graph",
+        ":faved_tweets",
+        ":flock_belongs_to_group",
+        ":flock_blocks",
+        ":flock_contributors",
+        ":flock_follows",
+        ":flock_mute",
+        ":flock_report_as_abuse",
+        ":flock_subscribes_to_group",
+        ":hashtag_features",
+        ":legit_tattles_graph",
+        ":non_legit_tattles_no_blocks_graph",
+        ":retweeted_tweets",
+        ":tweet_author_engagement_graph",
+    ],
+    platform = "java8",
+    sources = [],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)

@@ -1,0 +1,44 @@
+import <visibility/under-the-hood/sharedConfig>
+
+type Key = com.twitter.visibility.under_the_hood.UthUserMonthKey
+type Value = com.twitter.visibility.under_the_hood.UthUserMonthAggregate
+
+Managed({
+  source = ManhattanColumn({
+    dest = sharedConfig.mhUnderTheHoodConfig.dest,
+    appId = sharedConfig.mhUnderTheHoodConfig.appId,
+    dataset = sharedConfig.mhUnderTheHoodConfig.user_month_dataset,
+    mapping = ReadOnly({
+      key = Type(Key),
+      value = Type(Value),
+      keyEncoding = ThriftEncoding({ encodingType = ThriftBinaryEncoding }),
+      valueEncoding = ThriftEncoding({ encodingType = ThriftBinaryEncoding }),
+    }),
+  }),
+  contactInfo = Some(sharedConfig.contactInfo),
+  lifecycle = Production,
+  accessPolicy = AnyOf({
+    policies = Seq(
+      FromColumns(Set(
+        Path("visibility/under-the-hood/underTheHoodReport.User"),
+        Path("visibility/under-the-hood/underTheHoodReport"),
+      )),
+      Has({ principal = LdapGroup({ id = "visibility-admins" }) }),
+      Has({ principal = LdapGroup({ id = "birdwatch-admins" }) }),
+      Has({ principal = LdapGroup({ id = "birdwatch-team" }) }),
+      Has({ principal = LdapGroup({ id = "platform-manipulation-admins" }) }),
+      ServiceIdentifierPattern({
+        role = "stratostore",
+        service = "stratoapi",
+        env = "*",
+        zone = Seq("all"),
+      }),
+    )
+  }),
+  description = PlainText(
+    "Under the Hood user-month aggregates MH-RO. " +
+      "Key = UthUserMonthKey(userId, monthBucket). Value = UthUserMonthAggregate. " +
+      "userId=-1 is metadata (empty aggs + daysIncluded) for each published monthBucket. " +
+      "Written by uth_user_month_mh_publisher (VersionedKeyVal dual-write)."
+  ),
+})

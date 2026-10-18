@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 X.AI Corp.
+[project]
+dependencies = [
+    "typing-extensions>=4.13.0",
+]
+name = "xai-configlib"
+requires-python = ">=3.10"
+version = "0.1.0"
+
+[build-system]
+build-backend = "hatchling.build"
+requires = ["hatchling"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3.5",
+]

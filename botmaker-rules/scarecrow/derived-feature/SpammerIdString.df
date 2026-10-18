@@ -1,0 +1,4 @@
+description:\nexpression: |
+  ToString(spammerId)
+logged: 'false'
+returnType: StrValue

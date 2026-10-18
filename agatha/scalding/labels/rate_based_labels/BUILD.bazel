@@ -1,0 +1,89 @@
+scala_library(
+    name = "rate_based_labels",
+    dependencies = [
+        "3rdparty/src/jvm/com/twitter/scalding:core",
+        "abuse/detection/src/main/scala/com/twitter/abuse/detection/mention_interactions:mention_interactions-scala",
+        "abuse/detection/src/main/thrift/com/twitter/abuse/detection/mention_interactions:thrift-scala",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/labels:label_extraction_template",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/labels:label_util",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/labels/blocks_per_fav",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/labels/blocks_per_fav:blocks_per_fav_user_label-scala",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/labels/blocks_per_fav:mention_filtered_blocks_per_fav_user_label-scala",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/labels/favs",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/labels/reports_per_fav",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/labels/reports_per_fav:mention_filtered_reports_per_fav_user_label-scala",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/labels/reports_per_fav:reports_per_fav_user_label-scala",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/labels/spam_reports_per_fav",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/labels/spam_reports_per_fav:all_spam_reports_per_fav_user_label-scala",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/labels/spam_reports_per_fav:spam_reports_per_fav_user_label-scala",
+        "graphstore/common:flock_blocks-java",
+        "hub/agatha/src/main/scala/com/twitter/hub/agatha/labels:label-generator",
+        "hub/agatha/src/main/scala/com/twitter/hub/agatha/labels:label-util",
+        "hub/agatha/src/main/thrift/com/twitter/hub/agatha:agatha-scala",
+        "src/scala/com/twitter/common_internal/analytics/artificial_user_filter",
+        "src/scala/com/twitter/spam/scalding/datasets:tattle_events-scala",
+        "src/thrift/com/twitter/spam:spam-scala",
+        "src/thrift/com/twitter/timelineservice/server/internal:thrift-scala",
+        "twadoop_config/configuration/log_categories/group/useng:audit_service_user_actions-scala",
+        "twadoop_config/configuration/log_categories/group/useng:rtp_reports-scala",
+        "usersource/snapshot/src/main/scala/com/twitter/usersource/snapshot/combined:usersource-scala",
+    ],
+    platform = "java8",
+    sources = [
+        "RateBasedLabels.scala",
+        "RateBasedLabelsExtraction.scala",
+    ],
+    strict_deps = False,
+    tags = [
+        "bazel-compatible",
+        "bazel-only",
+    ],
+)
+
+hadoop_binary(
+    name = "rate-based-label-bin",
+    dependencies = [
+        ":rate_based_labels",
+        "science/scalding/scripts:scalding-repl-deps",
+    ],
+    main = "com.twitter.agatha.scalding.labels.rate_based_labels.ScheduledRateBasedExtractionJob",
+    platform = "java8",
+    runtime_platform = "java8",
+    tags = [
+        "bazel-compatible",
+        "bazel-compatible:migrated",
+        "bazel-only",
+    ],
+)
+
+scalding_job(
+    name = "rate_based_labels_job",
+    args = ["--tz UTC --batch_timeout 259200 --batchFirstTime 2020-10-22 --increment 7 --batchDesc RateBasedLabels"],
+    config = [
+        ("hadoop.combine-input", "true"),
+        ("hadoop.map.jvm.total-memory", "3072m"),
+        ("hadoop.queue", "agatha.tier3"),
+        ("hadoop.reduce.jvm.total-memory", "3072m"),
+        ("hadoop.split-size", "1073741824"),
+        ("hadoop.submitter.jvm.total-memory", "5120m"),
+    ],
+    contact = "agatha-owners@twitter.com",
+    cron = "0 * * * *",
+    dependencies = [
+        ":rate_based_labels",
+        "science/scalding/scripts:scalding-repl-deps",
+    ],
+    hadoop_cluster = "atla-proc",
+    hadoop_properties = [
+        ("scalding.auto_tuning.estimator.reducer.max.estimated", "10000"),
+        ("scalding.reducer.estimator.max.estimated.reducers", "10000"),
+    ],
+    main = "com.twitter.agatha.scalding.labels.rate_based_labels.ScheduledRateBasedExtractionJob",
+    platform = "java8",
+    role = "agatha",
+    runtime_platform = "java8",
+    tags = [
+        "bazel-compatible:migrated",
+        "bazel-only",
+    ],
+)

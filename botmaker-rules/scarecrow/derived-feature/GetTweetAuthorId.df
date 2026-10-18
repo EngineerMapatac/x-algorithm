@@ -1,0 +1,7 @@
+description:\nexpression: |
+  params(Long :tweetId)
+  {
+    TryOrElse(GetTweet(:tweetId).core_data.user_id, -1)
+  }
+logged: 'false'
+returnType: LongValue

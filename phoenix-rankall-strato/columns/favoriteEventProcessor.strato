@@ -1,0 +1,180 @@
+
+import <hydra/sharedConfig>
+import <hydra/eventProcessing>
+
+type Event = com.twitter.timelineservice.Event
+type FavoriteEvent = com.twitter.timelineservice.FavoriteEvent
+type Tweet = com.twitter.tweetypie.Tweet
+type TriggerInfo = com.twitter.strato.columns.hydra.TweetUpdateTriggerInfo
+type PhoenixRankAllIndexingRequest = com.twitter.strato.columns.hydra.PhoenixRankAllIndexingRequest
+
+val tweetUpdateThresholdsCache = #<hydra/tweetUpdateThresholdsCache>
+val publishFavEventKafka = #<hydra/kafka/favIndexingEventKafkaTopic>
+
+def nextPowerOfTwo(count: Long): Long = {
+  val nextPow = if (count == 0) { 1.0 } else {
+    val log2Count = Math.log(count)/Math.log(2)
+    val floor = Math.floor(log2Count)
+    floor + 1
+  }
+  Math.pow(2, nextPow).toInt
+}
+
+def updateCachedThreshold(
+  tweetId: Long,
+  count: Long,
+  tweetAge: Option[Long],
+  latest: TriggerInfo
+): Unit = {
+  val nextThreshold = nextPowerOfTwo(count)
+  val update = {
+    nextTriggerThreshold = nextThreshold,
+    lastUpdateMsec = Time.now.inMillis,
+    firstUpdateMsec = latest.firstUpdateMsec
+  }
+  tweetUpdateThresholdsCache.put(tweetId, update)
+  Log.info(
+    "updated info for cached tweet "
+    +tweetId.toString
+    +" favs:"+count.toString
+    +" prevThreshold:"+latest.toString
+    +" newThreshold:"+update.toString
+  )
+}
+
+def cacheNewThreshold(
+  tweetId: Long,
+  count: Long,
+  tweetAge: Option[Long]
+): Unit  = {
+  val now = Time.now.inMillis
+  val nextThreshold = nextPowerOfTwo(count)
+  val update = {
+    nextTriggerThreshold = nextThreshold,
+    lastUpdateMsec = now,
+    firstUpdateMsec = now
+  }
+  tweetUpdateThresholdsCache.put(tweetId, update)
+  Log.info(
+    "wrote info for uncached tweet "
+    +tweetId.toString
+    +" favs:"+count.toString
+    +" newThreshold:"+update.toString
+  )
+}
+
+type EventLog = com.twitter.strato.columns.hydra.StreamingEventLog
+def eventLog(
+  tweetId: Long,
+  favEvent: FavoriteEvent,
+  tweetCreatedAtMsec: Option[Long],
+  favCount: Option[Long]
+): EventLog = {
+  {
+    tweetId = tweetId,
+    originalEventTimeMs = favEvent.eventTimeMs,
+    eventProcessTimeMs = Time.now.inMillis,
+    tweetCreatedAtMs = tweetCreatedAtMsec,
+    tweetFavCount = favCount
+  }
+}
+
+val executeOp = Op.execute({ idempotent = true })[Event, Unit] { ctx =>
+  val stats = ctx.statsReceiver.scope("hydra_favorite_events")
+  val eventsRead = stats.counter("read")
+  val eventsForwarded = stats.counter("forwarded")
+  val missingFavCount = stats.counter("missing_fav_count")
+  val unfavIgnored = stats.counter("ignored_unfavorite")
+  val cacheUpdates = stats.scope("cache_updates")
+  val updateCachedTweet = cacheUpdates.counter("update_cached_tweet")
+  val skipCachedTweet = cacheUpdates.counter("skip_cached_tweet")
+  val putUncachedTweet = cacheUpdates.counter("put_uncached_tweet")
+
+  val event = ctx.arg
+  eventsRead.incr(1)
+
+  event match {
+    case Favorite(favEvent) => {
+
+        val tweetId = favEvent.tweetId
+        val favCountOpt = for {
+          tweet <- favEvent.tweet
+          counts <- tweet.counts
+          favCount <- counts.favoriteCount
+        } yield {
+          favCount
+        }
+        val tweetCreatedAtMsec = for {
+          tweet <- favEvent.tweet
+          core <- tweet.coreData
+        } yield {
+          core.createdAtSecs * 1000
+        }
+
+        val eventLog = eventLog(tweetId, favEvent, tweetCreatedAtMsec, favCountOpt)
+        #<hydra/scribeEvents>.execute(eventLog)
+
+        favCountOpt match {
+          case Some(favCount) =>
+            eventsRead.incr(1)
+            tweetUpdateThresholdsCache.fetch(tweetId, ()).v match {
+              case Some(latest) =>
+                if (eventProcessing.checkCachedTweetNewFavEventShouldTrigger(tweetId, favCount, tweetCreatedAtMsec, latest)) {
+                  Log.info(
+                    "triggered cached tweet "
+                      +tweetId.toString
+                      +" favs:"+favCount.toString
+                      +" prevThreshold:"+latest.toString
+                  )
+                  val phoenixRequest: PhoenixRankAllIndexingRequest = { postId=tweetId, eventSource=Fav}
+                  publishFavEventKafka.insert((), phoenixRequest)
+                  eventsForwarded.incr(1)
+                  updateCachedThreshold(tweetId, favCount, tweetCreatedAtMsec, latest)
+                  updateCachedTweet.incr(1)
+                }
+              case None =>
+                if (eventProcessing.checkUncachedTweetNewFavEventShouldTrigger(tweetId, favCount, tweetCreatedAtMsec)) {
+                  Log.info(
+                    "triggered uncached tweet "
+                    +tweetId.toString
+                    +" favs:"+favCount.toString
+                  )
+                  val phoenixRequest: PhoenixRankAllIndexingRequest = { postId=tweetId, eventSource=Fav}
+                  publishFavEventKafka.insert((), phoenixRequest)
+                  eventsForwarded.incr(1)
+
+                  cacheNewThreshold(tweetId, favCount, tweetCreatedAtMsec)
+                  putUncachedTweet.incr(1)
+                }
+            }
+          case None => {
+            missingFavCount.incr(1)
+          }
+        }
+      }
+    case _ => {
+      unfavIgnored.incr(1)
+    }
+  }
+  Ok
+}
+
+val accessPolicy = AnyOf(Seq(
+  Has(FromStreamForwarder("hydra/favoriteEventForwarder")),
+  sharedConfig.adminPolicy
+))
+
+Managed({
+  source = QueryColumn({ ops = Map(Execute -> executeOp) }),
+  contactInfo = Some(sharedConfig.contactInfo),
+  lifecycle = Production,
+  clusterAffinity = Patient,
+  description = PlainText(
+    """
+    Receives Favorite events from hydra/favoriteEventForwarder and publishes
+    phoenix rank-all fav indexing events, rate-limited per tweet by
+    power-of-two favorite-count thresholds.
+    """
+  ),
+  accessPolicy = accessPolicy
+})

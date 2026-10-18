@@ -1,0 +1,30 @@
+[workspace]
+
+[package]
+name = "abuse-v3-features"
+version = "0.1.0"
+edition = "2021"
+description = """
+V3 feature extractor: zstd(Arrow IPC from Manhattan) → numpy 48-feature batch.
+Reads the full Arrow IPC schema including device telemetry, IP, search query,
+country, timezone, view_count, video_duration, and all engagement counts.
+Derives action_group and action_category from action_name.
+Single extractor, single output contract, no aggregator needed.
+"""
+
+[lib]
+name = "abuse_v3_features"
+crate-type = ["cdylib"]
+
+[dependencies]
+arrow = { version = "54", features = ["ipc", "ipc_compression"] }
+zstd = "0.13"
+pyo3 = { version = "0.23", features = ["extension-module", "anyhow"] }
+numpy = "0.23"
+anyhow = "1"
+sha2 = "0.10"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

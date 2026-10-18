@@ -1,0 +1,5 @@
+description:\nexpression: |
+  params(String :jobName, String :entityId, Long :ttlSecs = 86400)
+  SetLabelWithTtl(Concat(BQ_to_BM_namespace, :jobName), :entityId, "TRUE", :ttlSecs)
+logged: 'false'
+returnType: Auto

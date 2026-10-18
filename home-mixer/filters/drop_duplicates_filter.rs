@@ -1,30 +1,33 @@
-use crate::candidate_pipeline::candidate::PostCandidate;
-use crate::candidate_pipeline::query::ScoredPostsQuery;
-use std::collections::HashSet;
-use tonic::async_trait;
+use crate::models::candidate::PostCandidate;
+use crate::models::query::ScoredPostsQuery;
+use rustc_hash::FxHashMap;
 use xai_candidate_pipeline::filter::{Filter, FilterResult};
 
 pub struct DropDuplicatesFilter;
 
-#[async_trait]
 impl Filter<ScoredPostsQuery, PostCandidate> for DropDuplicatesFilter {
-    async fn filter(
+    fn filter(
         &self,
         _query: &ScoredPostsQuery,
         candidates: Vec<PostCandidate>,
-    ) -> Result<FilterResult<PostCandidate>, String> {
-        let mut seen_ids = HashSet::new();
-        let mut kept = Vec::new();
+    ) -> FilterResult<PostCandidate> {
+        let mut kept_index: FxHashMap<u64, usize> =
+            FxHashMap::with_capacity_and_hasher(candidates.len(), Default::default());
+        let mut kept: Vec<PostCandidate> = Vec::with_capacity(candidates.len());
         let mut removed = Vec::new();
 
-        for candidate in candidates {
-            if seen_ids.insert(candidate.tweet_id) {
-                kept.push(candidate);
-            } else {
+        for mut candidate in candidates {
+            if let Some(&idx) = kept_index.get(&candidate.tweet_id) {
+                kept[idx]
+                    .retrieval_sources
+                    .append(&mut candidate.retrieval_sources);
                 removed.push(candidate);
+            } else {
+                kept_index.insert(candidate.tweet_id, kept.len());
+                kept.push(candidate);
             }
         }
 
-        Ok(FilterResult { kept, removed })
+        FilterResult { kept, removed }
     }
 }

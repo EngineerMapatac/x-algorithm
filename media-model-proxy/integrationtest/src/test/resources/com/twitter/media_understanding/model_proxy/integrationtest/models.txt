@@ -1,0 +1,5 @@
+CategoryClassification
+Fingerprinting
+HatefulSymbolRecognition
+ViolenceAndGore
+XxNsfw

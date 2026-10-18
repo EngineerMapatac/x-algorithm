@@ -1,0 +1,16 @@
+description:\nexpression: |
+  params(List<Long> :items, Long :start, Long :end)
+  {
+    val :startlimit = If(:start < 0 || :start > :end || :start > Size(:items), 0, :start);
+    val :endlimit = If (:end < 0 || :end > Size(:items), Size(:items), :end);
+
+    val :range = Range(:startlimit, :endlimit, 1);
+
+    val :subList = for (:i in :range) {
+      ElementAtIndex(:items, :i);
+    };
+
+    :subList;
+  }
+logged: 'false'
+returnType: LongListValue

@@ -1,0 +1,4 @@
+description:\nexpression: |
+  60
+logged: 'false'
+returnType: LongValue

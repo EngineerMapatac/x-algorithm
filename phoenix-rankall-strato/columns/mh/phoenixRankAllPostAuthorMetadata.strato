@@ -1,0 +1,22 @@
+import <hydra/sharedConfig>
+
+type PhoenixRankAllCandidate = com.twitter.strato.columns.hydra.PhoenixRankAllCandidate
+
+Managed({
+  source = ManhattanColumn({
+    dest = "/s/manhattan/nash.native-thrift",
+    appId = "phoenix_rank_all",
+    dataset = "post_author_metadata",
+    mapping = Simple({
+      key = Type(Long),
+      value = Type(PhoenixRankAllCandidate),
+      keyEncoding = NativeEncoding,
+      valueEncoding = ThriftEncoding,
+    }),
+    ttl = 2.days,
+  }),
+  accessPolicy = AllowAll,
+  lifecycle = Development,
+  contactInfo = Some(sharedConfig.contactInfo),
+  description = PlainText("Manhattan storage for Phoenix Rank All post author metadata")
+})

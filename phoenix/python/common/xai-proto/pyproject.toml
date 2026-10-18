@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 X.AI Corp.
+[project]
+dependencies = ["grpcio-tools==1.83.0", "protobuf>=7.36.0"]
+name = "xai-proto"
+version = "0.0.2"
+
+[build-system]
+backend-path = ["."]
+build-backend = "backend_proxy"
+requires = ["hatchling>=1.20", "grpcio-tools==1.83.0"]
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "hatch_build.py" },
+    { file = "backend_proxy.py" },
+    { file = "proto/**" },
+]

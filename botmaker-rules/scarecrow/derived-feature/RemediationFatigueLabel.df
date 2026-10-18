@@ -1,0 +1,4 @@
+description:\nexpression: |
+  "REMEDIATION_FATIGUE_LABEL"
+logged: 'false'
+returnType: StrValue

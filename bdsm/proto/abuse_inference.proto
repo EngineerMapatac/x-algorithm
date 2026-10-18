@@ -1,0 +1,133 @@
+syntax = "proto3";
+
+package xai.abuse.inference.v1;
+
+message ActionCount {
+  int32 action_type_id = 1;
+  uint32 count = 2;
+  string action_name = 3;
+}
+
+message FiredHead {
+  string name = 1;
+  double score = 2;
+  double threshold = 3;
+}
+
+message SummaryCounters {
+  string reason_code = 1;
+  uint32 total_actions = 2;
+  uint32 server_pct = 3;
+  uint32 renders = 4;
+  uint32 dwells = 5;
+  uint32 avg_dwell_ms = 6;
+  uint32 distinct_action_types = 7;
+  uint32 distinct_targets = 8;
+  uint32 distinct_posts = 9;
+  uint32 api_follows = 10;
+  uint32 api_replies = 11;
+  uint32 api_favs = 12;
+  uint32 api_retweets = 13;
+  uint32 client_clicks = 14;
+  uint32 client_photo_expand = 15;
+  uint32 client_follows = 16;
+
+  repeated string labels = 17;
+
+  repeated FiredHead fired_heads = 18;
+}
+
+message SequenceUpdateEvent {
+  int64 user_id = 1;
+  int64 write_ts_ms = 2;
+  int64 latest_action_ts_ms = 3;
+  int64 sequence_version = 4;
+  string sequence_fingerprint = 5;
+  uint32 sequence_len = 6;
+  uint32 delta_action_count = 7;
+  uint32 reply_count_delta = 8;
+  uint32 follow_count_delta = 9;
+  uint32 report_count_delta = 10;
+  uint32 render_count_delta = 11;
+  uint32 dwell_count_delta = 12;
+  string prior_score_tier = 13;
+  string producer_version = 14;
+}
+
+message ScoreRequest {
+  int64 user_id = 1;
+  string target_model_version = 2;
+  string queue_priority = 3;
+  string enqueue_reason = 4;
+  int64 enqueue_ts_ms = 5;
+  int64 sequence_version = 6;
+  string sequence_fingerprint = 7;
+  repeated string trigger_sources = 8;
+  bool force_rescore = 9;
+}
+
+message DecodedAction {
+  uint32 idx = 1;
+  string action_type = 2;
+  int64 tweet_id = 3;
+  int64 author_id = 4;
+  int64 engagement_time_ms = 5;
+  double dwell_ms = 6;
+  string product_surface = 7;
+  int64 client_app_id = 8;
+}
+
+message ScoreResult {
+  int64 user_id = 1;
+  string model_version = 2;
+  int64 score_ts_ms = 3;
+  string score_status = 4;
+  string queue_priority = 5;
+  string enqueue_reason = 6;
+  int64 latest_action_ts_ms = 7;
+  int64 scored_sequence_version = 8;
+  string scored_sequence_fingerprint = 9;
+  uint32 sequence_len = 10;
+  repeated double raw_head_scores = 11;
+  SummaryCounters summary = 12;
+  repeated ActionCount action_counts_non_zero = 13;
+  uint32 scorer_latency_ms = 14;
+  uint32 manhattan_read_latency_ms = 15;
+  uint32 feature_build_latency_ms = 16;
+  repeated string trigger_sources = 17;
+
+  repeated DecodedAction decoded_actions = 18;
+
+  // Optional human-readable note. In this release templates and
+  // key_actions are the sentinel "<redacted>" (see README); production
+  // fills the real appeal paragraph. ActionName enums are unchanged.
+  string enforcement_note = 19;
+}
+
+message TriggerActivityState {
+  int64 user_id = 1;
+  string active_model_version = 2;
+  string last_seen_sequence_fingerprint = 3;
+  int64 last_seen_write_ts_ms = 4;
+  int64 last_seen_latest_action_ts_ms = 5;
+  uint32 last_seen_sequence_len = 6;
+  string last_enqueued_fingerprint = 7;
+  int64 last_enqueue_ts_ms = 8;
+  string last_enqueue_reason = 9;
+  string last_queue_priority = 10;
+  string last_scored_fingerprint = 11;
+  int64 last_score_ts_ms = 12;
+  string last_risk_tier = 13;
+  int64 last_state_update_ts_ms = 14;
+}
+
+message RiskTierTransitionEvent {
+  int64 user_id = 1;
+  string model_version = 2;
+  string previous_risk_tier = 3;
+  string new_risk_tier = 4;
+  double aggregate_risk = 5;
+  string scored_sequence_fingerprint = 6;
+  int64 score_ts_ms = 7;
+  string transition_reason = 8;
+}

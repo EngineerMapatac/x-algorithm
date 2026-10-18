@@ -1,0 +1,10 @@
+scala_library(
+    name = "client",
+    dependencies = [
+        "botmaker/botmaker_app/src/main/scala/com/twitter/botmaker/app/server",
+    ],
+    platform = "java8",
+    sources = ["**/*.scala"],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)

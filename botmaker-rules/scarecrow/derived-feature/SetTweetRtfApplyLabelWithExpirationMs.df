@@ -1,0 +1,22 @@
+description:\nexpression: |
+  params(String :labelName, Long :tweetId, Long :expirationTimeMs) {
+    if (:expirationTimeMs > CurrentTimeMs()) {
+      TweetRtfApplyLabel(
+        :labelName,
+        :tweetId,
+        [],
+        FALSE,
+        NULL,
+        FALSE,
+        NULL,
+        NULL,
+        NULL,
+        :expirationTimeMs
+      )
+    } else {
+      val :stat = Join("/", RULE_ID, "SetLabelWithExpiredTtl");
+      IncrementStat(:stat, 1)
+    }
+  }
+logged: 'false'
+returnType: Auto

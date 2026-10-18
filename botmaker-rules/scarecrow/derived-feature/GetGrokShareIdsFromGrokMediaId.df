@@ -1,0 +1,24 @@
+description:\nexpression: |
+  param(Long :grokMediaId){
+    val :slice = Map("Slice": Map(
+      "from": ["share_urls", ""],
+      "to": ["share_urls", "z"]
+    ));
+
+    val :rawRes = JsonParse(TryOrElse(DoStratoColumnOp(
+      "",
+      "searchai/storage/grokMediaIdShareIdMappingDatabase",
+      "scan",
+      ArgsToStratoJson("scan", [:grokMediaId, :slice], NULL)
+    ), []));
+    # Result comes in the format Seq(Tuple(Tuple(<grok_media_id>, Tuple("share_id", <share_id>)), ()))
+    val :res = FOREACH :item IN :rawRes DO {
+      val :first = :item[0];
+      val :scanArg = :first[1];
+      :scanArg[1]
+    };
+
+    :res
+  }
+logged: 'false'
+returnType: Auto

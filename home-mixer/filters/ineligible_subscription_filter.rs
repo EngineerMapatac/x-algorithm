@@ -1,19 +1,16 @@
-use crate::candidate_pipeline::candidate::PostCandidate;
-use crate::candidate_pipeline::query::ScoredPostsQuery;
+use crate::models::candidate::PostCandidate;
+use crate::models::query::ScoredPostsQuery;
 use std::collections::HashSet;
-use tonic::async_trait;
 use xai_candidate_pipeline::filter::{Filter, FilterResult};
 
-/// Filters out subscription-only posts from authors the viewer is not subscribed to.
 pub struct IneligibleSubscriptionFilter;
 
-#[async_trait]
 impl Filter<ScoredPostsQuery, PostCandidate> for IneligibleSubscriptionFilter {
-    async fn filter(
+    fn filter(
         &self,
         query: &ScoredPostsQuery,
         candidates: Vec<PostCandidate>,
-    ) -> Result<FilterResult<PostCandidate>, String> {
+    ) -> FilterResult<PostCandidate> {
         let subscribed_user_ids: HashSet<u64> = query
             .user_features
             .subscribed_user_ids
@@ -29,6 +26,44 @@ impl Filter<ScoredPostsQuery, PostCandidate> for IneligibleSubscriptionFilter {
                     None => true,
                 });
 
-        Ok(FilterResult { kept, removed })
+        FilterResult { kept, removed }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate(subscription_author_id: Option<u64>) -> PostCandidate {
+        PostCandidate {
+            subscription_author_id,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn keeps_only_subscribed_authors() {
+        let filter = IneligibleSubscriptionFilter;
+        let mut query = ScoredPostsQuery::default();
+        query.user_features.subscribed_user_ids = vec![1, 2];
+
+        let candidates = vec![candidate(Some(1)), candidate(Some(3)), candidate(None)];
+
+        let result = filter.filter(&query, candidates);
+
+        assert_eq!(result.kept.len(), 2);
+        assert_eq!(result.removed.len(), 1);
+        assert!(result
+            .kept
+            .iter()
+            .any(|c| c.subscription_author_id == Some(1)));
+        assert!(result
+            .kept
+            .iter()
+            .any(|c| c.subscription_author_id.is_none()));
+        assert!(result
+            .removed
+            .iter()
+            .any(|c| c.subscription_author_id == Some(3)));
     }
 }

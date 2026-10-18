@@ -1,0 +1,14 @@
+for_entity: post
+rules:
+  - id: post_allowlisted
+    when: post_allowlist.is_allowlisted || user_allowlist.is_allowlisted
+    then: { kind: skip, reason: post_allowlisted }
+  - id: author_cred_skip
+    when: cred.is_high
+    then: { kind: skip, reason: author_cred_skip }
+  - id: post_label
+    when: '"post_label" in post.labels'
+    then: { kind: act_add_post_labels_v2, labels: ["SomeLabel"] }
+  - id: post_default
+    when: "true"
+    then: { kind: skip, reason: post_no_action }

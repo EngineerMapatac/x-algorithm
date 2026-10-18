@@ -1,0 +1,57 @@
+scala_library(
+    name = "reports_per_fav",
+    dependencies = [
+        ":mention_filtered_reports_per_fav_user_label-scala",
+        ":reports_per_fav_user_label-scala",
+        "3rdparty/src/jvm/com/twitter/scalding:core",
+        "agatha/src/main/scala/com/twitter/agatha/scalding/labels/favs",
+        "graphstore/common:flock_blocks-java",
+        "hub/agatha/src/main/scala/com/twitter/hub/agatha/labels:label-generator",
+        "hub/agatha/src/main/scala/com/twitter/hub/agatha/labels:label-util",
+        "hub/agatha/src/main/thrift/com/twitter/hub/agatha:agatha-scala",
+        "hub/scalding/source",
+    ],
+    platform = "java8",
+    sources = [
+        "ReportsPerFav.scala",
+    ],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)
+
+hadoop_binary(
+    name = "reports-per-fav-label-bin",
+    dependencies = [":reports_per_fav"],
+    main = "com.twitter.hub.agatha.labels.reports_per_fav",
+    platform = "java8",
+    runtime_platform = "java8",
+    tags = [
+        "bazel-compatible",
+        "bazel-compatible:migrated",
+        "bazel-only",
+    ],
+)
+
+create_datasets(
+    base_name = "reports_per_fav_user_label",
+    java_dependencies = ["hub/agatha/src/main/thrift/com/twitter/hub/agatha:agatha-java"],
+    java_schema = "com.twitter.hub.agatha.thriftjava.UserLabel",
+    platform = "java8",
+    role = "agatha",
+    scala_dependencies = ["hub/agatha/src/main/thrift/com/twitter/hub/agatha:agatha-scala"],
+    scala_schema = "com.twitter.hub.agatha.thriftscala.UserLabel",
+    segment_type = "snapshot",
+    tags = ["bazel-compatible"],
+)
+
+create_datasets(
+    base_name = "mention_filtered_reports_per_fav_user_label",
+    java_dependencies = ["hub/agatha/src/main/thrift/com/twitter/hub/agatha:agatha-java"],
+    java_schema = "com.twitter.hub.agatha.thriftjava.UserLabel",
+    platform = "java8",
+    role = "agatha",
+    scala_dependencies = ["hub/agatha/src/main/thrift/com/twitter/hub/agatha:agatha-scala"],
+    scala_schema = "com.twitter.hub.agatha.thriftscala.UserLabel",
+    segment_type = "snapshot",
+    tags = ["bazel-compatible"],
+)

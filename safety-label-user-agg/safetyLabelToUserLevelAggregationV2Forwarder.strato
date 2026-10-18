@@ -1,0 +1,21 @@
+import <content_understanding/sharedConfig>
+
+StreamForwarder({
+  source = KafkaTopic({
+    topic = "vf_tweet_safety_labels_event_prod",
+    dest = "/s/kafka/main-2:kafka-tls",
+    consumerGroupId = "safety-label-user-level-aggregation-v2",
+    develConsumerGroupId = None,
+    mapping = ValueOnly({
+      value = Type(com.twitter.spam.rtf.TweetSafetyLabelEvent),
+      encoding = ThriftEncoding
+    })
+  }),
+  forwardToOp = Execute,
+  forwardEventsFrom = LocalZoneOnly,
+  forwardToColumn = #<safety_understanding/safetyLabelToUserLevelAggregationV2Processor>,
+  contactInfo = Some(sharedConfig.contactInfo),
+  delay = 10.minutes,
+  slo = { maxLag = 20.minutes },
+  lifecycle = Production
+})

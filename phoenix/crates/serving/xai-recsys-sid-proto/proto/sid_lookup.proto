@@ -1,0 +1,21 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 X.AI Corp.
+syntax = "proto3";
+
+package sid_lookup;
+
+service SidLookupService {
+  rpc LookupSids(LookupSidsRequest) returns (LookupSidsResponse);
+}
+
+message LookupSidsRequest {
+  repeated int64 post_ids = 1;
+}
+
+message LookupSidsResponse {
+  repeated PostSids results = 1;
+}
+
+message PostSids {
+  repeated int32 codes = 1;
+}

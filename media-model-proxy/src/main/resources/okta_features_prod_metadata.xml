@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?><md:EntityDescriptor entityID="http://www.okta.com/exk1jyo75f5s4Wo6V1d8" xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata"><md:IDPSSODescriptor WantAuthnRequestsSigned="false" protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol"><md:KeyDescriptor use="signing"><ds:KeyInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:X509Data><ds:X509Certificate>MIIDnjCCAoagAwIBAgIGAV2m33reMA0GCSqGSIb3DQEBCwUAMIGPMQswCQYDVQQGEwJVUzETMBEG
+    A1UECAwKQ2FsaWZvcm5pYTEWMBQGA1UEBwwNU2FuIEZyYW5jaXNjbzENMAsGA1UECgwET2t0YTEU
+    MBIGA1UECwwLU1NPUHJvdmlkZXIxEDAOBgNVBAMMB3R3aXR0ZXIxHDAaBgkqhkiG9w0BCQEWDWlu
+    Zm9Ab2t0YS5jb20wHhcNMTcwODAzMDY1MzEwWhcNMjcwODAzMDY1NDA5WjCBjzELMAkGA1UEBhMC
+    VVMxEzARBgNVBAgMCkNhbGlmb3JuaWExFjAUBgNVBAcMDVNhbiBGcmFuY2lzY28xDTALBgNVBAoM
+    BE9rdGExFDASBgNVBAsMC1NTT1Byb3ZpZGVyMRAwDgYDVQQDDAd0d2l0dGVyMRwwGgYJKoZIhvcN
+    AQkBFg1pbmZvQG9rdGEuY29tMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAivm8KiRF
+    IRYDEvHGDootc/vip/32iXLyPDkc9TVaa0KjCV3sDrF6R29K10ZGh/eBEpKPG1d6FOkL/8h8DoTP
+    dlLSaBuE+V0Q77A1UE4T79hCT6qD7/UB6ruPV90JckIHnTetXA4G4gnFehj1iNzH5Nkvvo0i1pSs
+    0UBKPnkaQ+59B80BDOH3mEZ22sXH5rCrTRVDqDeAQQYw7xwEEIwFlH5hVz0tGHaKZyQxMB2PnHCH
+    OU05KA60ue81MVKXUbCI1q7h+jrinnhAVb8kwq6fKAJBpLF6BFb2UP0zugjH2p+qSrIEklyfXnvr
+    5+Ag6QEzsLtDFRhwKw/a7mA1gHPIRwIDAQABMA0GCSqGSIb3DQEBCwUAA4IBAQASzFXynUe0VIU9
+    IeZ5KwDV4nd/lLORVB0z6fbrFPzvaDwx8L/nvatwktjghajKO3XsovEvfb97DQu+RRGnPhLotDcx
+    2T1WRcCCyYdzgIC9sl+lozrB6igUlIeVazHh3hGGpy5DG5VyrCwuWbrpL3CF3zL/NELztW45Q+Ax
+    dGUm/9/TdYWNSyX95e/yUQvf0RFTYmyRIB37hfCHEwlqFGMgyHhehCstlJuhs7hMfdsfiPIGA86d
+    QKVJRBxz/4RK7NLr8aav+iu3pKGLhgcImAFtPxX/F9VPCFzl5so3jjpVOPb/NZQiNRemeE8j0PMm
+    i4tuzY8Qe0s8BY2wxhD6+OEv</ds:X509Certificate></ds:X509Data></ds:KeyInfo></md:KeyDescriptor><md:NameIDFormat>urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress</md:NameIDFormat><md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="https://twitter.okta.com/app/twitter_mediamodelproxyprod_1/exk1jyo75f5s4Wo6V1d8/sso/saml"/><md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://twitter.okta.com/app/twitter_mediamodelproxyprod_1/exk1jyo75f5s4Wo6V1d8/sso/saml"/></md:IDPSSODescriptor></md:EntityDescriptor>

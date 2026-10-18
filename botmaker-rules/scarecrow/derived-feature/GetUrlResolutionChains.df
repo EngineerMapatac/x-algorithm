@@ -1,0 +1,12 @@
+description:\nexpression: |
+  params(Set<String> :urls)
+  {
+    val :dict = GetUrlResolutions(:urls);
+    ToDict(for (:key in :urls) {
+      ToPair(:key, ListConcat([:key], Filter(:x, StrLen(:x) > 0,
+        SplitString(DictGetOrElse(:dict, :key, ""), " ")
+      )));
+    });
+  }
+logged: 'false'
+returnType: StrMapValue

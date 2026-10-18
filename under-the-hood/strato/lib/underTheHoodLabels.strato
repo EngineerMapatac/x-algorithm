@@ -1,0 +1,454 @@
+import <visibility/under-the-hood/sharedConfig>
+
+val postLabels = Map(
+  "NSFW_HIGH_RECALL" -> {
+    about =
+      "Post detected by automated systems as one that may contain content subject to X's Adult Content policy.",
+    effect =
+      "Post hidden from recommendations to non-followers and from underage users, users without a stated age, and logged out users.",
+  },
+  "NSFW_HIGH_PRECISION" -> {
+    about =
+      "Post detected by automated systems or in response to a user report as likely to contain content subject to X's Adult Content policy.",
+    effect =
+      "Post shown behind content warning, hidden from recommendations to non-followers and hidden from underage users, users without a stated age, and logged out users. In India, this content is shown as restricted due to local law(s).",
+  },
+  "NSFW_TEXT" -> {
+    about =
+      "Post detected by automated systems as likely to contain adult sexually explicit language.",
+    effect =
+      "Post hidden from recommendations to non-followers, and hidden from underage users, users without a stated age, and logged out users.",
+  },
+  "NSFW_CARD_IMAGE" -> {
+    about =
+      "Post detected by automated systems as likely to contain content subject to X's Adult Content policy.",
+    effect =
+      "Post shown behind content warning and hidden from recommendations to non-followers and hidden from underage users, users without a stated age and logged out users.",
+  },
+  "GORE_AND_VIOLENCE_HIGH_PRECISION" -> {
+    about =
+      "Post detected by automated systems or in response to a user report as likely to contain content subject to X's Violent Content policy.",
+    effect =
+      "Post shown behind content warning, hidden from recommendations to non-followers and hidden from underage users, users without a stated age, and logged out users.",
+  },
+  "SPAM_HIGH_RECALL" -> {
+    about = "Post detected by automated systems as one that may contain spam.",
+    effect = "Post hidden from recommendations to non-followers.",
+  },
+  "SPAM" -> {
+    about =
+      "Post identified by automated systems or in response to a user report as likely to contain content in violation of X's Authenticity policy.",
+    effect = "Post is not shown on X.",
+  },
+  "MALICIOUS_URL" -> {
+    about =
+      "Post detected by automated systems as likely to contain a link to a malicious site.",
+    effect = "Post hidden from recommendations to non-followers.",
+  },
+  "BRAZIL_ELECTION_LEGAL" -> {
+    about =
+      "Post detected by automated systems as one that may contain AI generated media related to electoral processes in violation of Brazil local law during silence period, specifically Tribunal Superior Eleitoral Resolution n. 23.610, Art9-B, § 3-A",
+    effect =
+      "In Brazil, post hidden from recommendations.",
+  },
+  "DO_NOT_AMPLIFY" -> {
+    about =
+      "Historically applied to posts detected by automated systems as likely to contain a link to a malicious site. Being replaced by MALICIOUS_URL label and then will be fully removed.",
+    effect =
+      "Included in this report since any posts that have this label would be hidden from recommendations to non-followers.",
+  },
+  "PDNA" -> {
+    about =
+      "Post detected by automated systems as likely to contain content in violation of X's Terms of Service policy.",
+    effect = "Post is not shown on X while pending further review.",
+  },
+  "BOUNCE" -> {
+    about =
+      "Post detected by automated systems or in response to a user report to contain content in violation of X's Terms of Service policy.",
+    effect = "Post is not shown on X while pending deletion by the author.",
+  },
+  "FOR_EMERGENCY_USE_ONLY" -> {
+    about = "Emergency incident-response label with a custom notice.",
+    effect =
+      "Posts that have this label would be shown behind a notice and not shown in the Home timeline.",
+  },
+  "FOSNR_ABUSE" -> {
+    about =
+      "Post detected in response to a user report to contain content in violation of X's Abuse and Harassment policy.",
+    effect =
+      "Post discoverability is restricted to the author's profile. All users can see a label explaining that the post has limited visibility.",
+  },
+  "FOSNR_HATEFUL_CONDUCT" -> {
+    about =
+      "Post detected by automation systems or in response to a user report to contain content in violation of X's Hateful Conduct policy.",
+    effect =
+      "Post discoverability is restricted to the author's profile. All users can see a label explaining that the post has limited visibility.",
+  },
+  "FOSNR_VIOLENT_SPEECH" -> {
+    about =
+      "Post detected in response to a user report to contain content in violation of X's Violent Content policy.",
+    effect =
+      "Post discoverability is restricted to the author's profile. All users can see a label explaining that the post has limited visibility.",
+  },
+  "FOSNR_CIVIC_INTEGRITY" -> {
+    about =
+      "Post detected in response to a user report to contain content in violation of X's Civic Integrity policy.",
+    effect =
+      "Post discoverability is restricted to the author's profile. All users can see a label explaining that the post has limited visibility.",
+  },
+  "FOSNR_ABUSE_INSULTS" -> {
+    about =
+      "Post detected by automated systems or in response to a user report to contain content in violation of X's Abuse and Harassment policy.",
+    effect =
+      "Post hidden from recommendations to non-followers. All users can see a label explaining that the post has limited visibility.",
+  },
+  "NSFW_ADMIN" -> {
+    about =
+      "Post written by an account with an NsfwAdmin user label, where the account was identified in response to a user report as primarily posting content subject to X's Adult Content or Violent Content policies.",
+    effect =
+      "Post shown behind content warning, hidden from recommendations to non-followers and from underage users, users without a stated age, and logged out users.",
+  },
+)
+
+val postLabelAliases = Map(
+  "NSFW_ADMIN_STAMPED" -> "NSFW_ADMIN",
+)
+
+val accountLabels = Map(
+  "ReadOnly" -> {
+    about =
+      "Account locked to read-only due to violation of X's Terms of Service policy that requires post removal from the platform.",
+    effect =
+      "The account can only read content on the platform until the post in violation is removed. The account's posts are hidden from recommendations to non-followers.",
+  },
+  "Compromised" -> {
+    about =
+      "Account identified by automated systems or in response to a user report as compromised.",
+    effect =
+      "The account's posts are hidden from recommendations to non-followers. Password reset required.",
+  },
+  "SpamHighRecall" -> {
+    about = "Account detected by automated systems as likely to post spam.",
+    effect = "The account's posts are hidden from recommendations to non-followers.",
+  },
+  "NsfwHighRecall" -> {
+    about =
+      "Account detected by automated systems as one that may post content subject to X's Adult Content policy.",
+    effect = "The account's posts are hidden from recommendations to non-followers.",
+  },
+  "NsfwHighPrecision" -> {
+    about =
+      "Account detected by automated systems as likely to post content subject to X's Adult Content policy.",
+    effect = "The account's posts are hidden from recommendations to non-followers.",
+  },
+  "NsfwAvatarImage" -> {
+    about =
+      "Account detected by automated systems as one that may post content subject to X's Adult Content policy.",
+    effect = "The account's posts are hidden from recommendations to non-followers.",
+  },
+  "NsfwNearPerfect" -> {
+    about =
+      "Account detected by automated systems as one that may post content subject to X's Adult Content policy.",
+    effect = "The account's posts are hidden from recommendations to non-followers.",
+  },
+  "NsfwBannerImage" -> {
+    about =
+      "Account detected by automated systems as one that may post content subject to X's Adult Content policy.",
+    effect = "The account's posts are hidden from recommendations to non-followers.",
+  },
+  "NsfwAdmin" -> {
+    about =
+      "Account identified in response to a user report as primarily posting content subject to X's Adult Content or Violent Content policies.",
+    effect =
+      "The account's posts are shown behind content warning, hidden from recommendations to non-followers and from underage users, users without a stated age, and logged out users.",
+  },
+  "ImpersonationHighPrecision" -> {
+    about =
+      "Account detected by automated systems as likely in violation of X's Authenticity policy.",
+    effect = "The account's posts are hidden from recommendations to non-followers.",
+  },
+  "AbusiveHighRecall" -> {
+    about =
+      "Account detected by automated systems may be in violation of X's Authenticity policy.",
+    effect =
+      "The account's posts are hidden from recommendations to non-followers. Security challenge required to prevent automated abuse.",
+  },
+  "DoNotAmplify" -> {
+    about =
+      "Account detected by automated systems as likely to contain content in violation of X's Terms of Service policy.",
+    effect =
+      "The account's posts are hidden from recommendations to non-followers pending further review.",
+  },
+)
+
+val worldwideCode = "xx"
+val worldwideCopyrightCode = "xy"
+val countriesPlaceholder = Regex.compile("\\{countries\\}")
+val takedownNamesWithCountries = Set("LegalRequest", "BystanderReport", "UnspecifiedReason")
+val takedownNamesWithoutCountries = Set("Dmca", "is_dmca")
+
+val postTakedowns = Map(
+  "BystanderReport(country)" -> {
+    about =
+      "Post withheld where the content has been found to violate local law(s) following a third-party report.",
+    effect = "Post is not shown on X in {countries} where it violates local law(s).",
+  },
+  "LegalRequest(country)" -> {
+    about = "Post has been withheld in response to a legal demand.",
+    effect = "Post is not shown on X in {countries} where it violates local law(s).",
+  },
+  "UnspecifiedReason(country)" -> {
+    about =
+      "Historically applied to posts withheld in response to a legal demand or if found to violate local law(s) following a third-party report.",
+    effect = "Post is not shown on X in {countries} where it violates local law(s).",
+  },
+  "LegalRequest(xx)" -> {
+    about = "Post has been withheld in response to a legal demand.",
+    effect = "Post is not shown on X.",
+  },
+  "UnspecifiedReason(xx)" -> {
+    about =
+      "Historically applied to posts withheld in response to a legal demand or if found to violate local law(s) following a third-party report.",
+    effect = "Post is not shown on X.",
+  },
+  "UnspecifiedReason(xy)" -> {
+    about =
+      "Applied in response to a report from a copyright holder or authorized representative to content found to violate X's Copyright policy. Applied along with the DMCA label.",
+    effect = "Post is not shown on X.",
+  },
+  "Dmca" -> {
+    about =
+      "Applied in response to a report from a copyright holder or authorized representative to content found to violate X's Copyright policy.",
+    effect = "Post is not shown on X.",
+  },
+  "is_dmca" -> {
+    about =
+      "Applied in response to a report from a copyright holder or authorized representative to content found to violate X's Copyright policy.",
+    effect =
+      "Post hidden from recommendations to non-followers. Where the post is seen, media in the post is unavailable.",
+  },
+)
+
+val accountTakedowns = Map(
+  "BystanderReport(country)" -> {
+    about =
+      "Posts from this account withheld where the account has been found to violate local law(s) following a third-party report.",
+    effect = "This account's posts are not shown on X in {countries} where it violates local law(s).",
+  },
+  "LegalRequest(country)" -> {
+    about = "Posts from this account withheld in response to a legal demand.",
+    effect = "This account's posts are not shown on X in {countries} where it violates local law(s).",
+  },
+  "UnspecifiedReason(country)" -> {
+    about =
+      "Historically applied to accounts withheld in response to a legal demand or if found to violate local law(s) following a third-party report.",
+    effect = "This account's posts are not shown on X in {countries} where it violates local law(s).",
+  },
+  "LegalRequest(xx)" -> {
+    about = "Posts from this account withheld in response to a legal demand.",
+    effect = "This account's posts are not shown on X.",
+  },
+  "UnspecifiedReason(xx)" -> {
+    about =
+      "Historically applied to accounts withheld in response to a legal demand or if found to violate local law(s) following a third-party report.",
+    effect = "This account's posts are not shown on X.",
+  },
+)
+
+def upperCodes(countryCodes: Seq[String]): String =
+  countryCodes.map { c => c.toUpperCase }.mkString(", ")
+
+def takedownCopyKey(label: String, countryCodes: Seq[String]): Option[String] =
+  if (takedownNamesWithoutCountries.contains(label)) {
+    Some(label)
+  } else if (!takedownNamesWithCountries.contains(label)) {
+    None
+  } else if (countryCodes.exists { c => c == worldwideCode }) {
+    Some(label + "(xx)")
+  } else if (countryCodes.exists { c => c == worldwideCopyrightCode }) {
+    Some(label + "(xy)")
+  } else if (countryCodes.isEmpty) {
+    None
+  } else {
+    Some(label + "(country)")
+  }
+
+def fillCountries(text: String, countryCodes: Seq[String]): String =
+  countriesPlaceholder.replaceAll(text, upperCodes(countryCodes))
+
+def takedownLabelName(label: String, countryCodes: Seq[String]): String =
+  if (takedownNamesWithCountries.contains(label) && countryCodes.nonEmpty) {
+    label + "(" + upperCodes(countryCodes) + ")"
+  } else {
+    label
+  }
+
+def postTakedownInfo(
+    label: String,
+    countryCodes: Seq[String]
+): Option[{ about: String, effect: String }] =
+  takedownCopyKey(label, countryCodes).flatMap { k => postTakedowns.get(k) }.map { info =>
+    { about = info.about, effect = fillCountries(info.effect, countryCodes) }
+  }
+
+def accountTakedownInfo(
+    label: String,
+    countryCodes: Seq[String]
+): Option[{ about: String, effect: String }] =
+  takedownCopyKey(label, countryCodes).flatMap { k => accountTakedowns.get(k) }.map { info =>
+    { about = info.about, effect = fillCountries(info.effect, countryCodes) }
+  }
+
+def isPostTakedownLabel(label: String, countryCodes: Seq[String]): Boolean =
+  postTakedownInfo(label, countryCodes) match {
+    case Some(_) => true
+    case None => false
+  }
+
+def isAccountTakedownLabel(label: String, countryCodes: Seq[String]): Boolean =
+  accountTakedownInfo(label, countryCodes) match {
+    case Some(_) => true
+    case None => false
+  }
+
+def postTakedownAbout(label: String, countryCodes: Seq[String]): String =
+  postTakedownInfo(label, countryCodes) match {
+    case Some(i) => i.about
+    case None => ""
+  }
+
+def postTakedownEffect(label: String, countryCodes: Seq[String]): String =
+  postTakedownInfo(label, countryCodes) match {
+    case Some(i) => i.effect
+    case None => ""
+  }
+
+def accountTakedownAbout(label: String, countryCodes: Seq[String]): String =
+  accountTakedownInfo(label, countryCodes) match {
+    case Some(i) => i.about
+    case None => ""
+  }
+
+def accountTakedownEffect(label: String, countryCodes: Seq[String]): String =
+  accountTakedownInfo(label, countryCodes) match {
+    case Some(i) => i.effect
+    case None => ""
+  }
+
+val underscore = Regex.compile("_")
+
+def normalizeLabel(code: String): String =
+  underscore.replaceAll(code, "").toUpperCase
+
+def resolvePostKey(code: String): Option[String] = {
+  val n = normalizeLabel(code)
+  val direct = postLabels.keys.filter { k => normalizeLabel(k) == n }.headOption
+  direct match {
+    case Some(k) => Some(k)
+    case None =>
+      postLabelAliases.keys
+        .filter { k => normalizeLabel(k) == n }
+        .headOption
+        .flatMap { alias => postLabelAliases.get(alias) }
+  }
+}
+
+def resolveAccountKey(code: String): Option[String] =
+  accountLabels.keys.filter { k => normalizeLabel(k) == normalizeLabel(code) }.headOption
+
+def isPostLabel(code: String): Boolean =
+  resolvePostKey(code) match {
+    case Some(_) => true
+    case None => false
+  }
+
+def isAccountLabel(code: String): Boolean =
+  resolveAccountKey(code) match {
+    case Some(_) => true
+    case None => false
+  }
+
+def postLabelName(code: String): String =
+  resolvePostKey(code) match {
+    case Some(k) => k
+    case None => code
+  }
+
+def accountLabelName(code: String): String =
+  resolveAccountKey(code) match {
+    case Some(k) => k
+    case None => code
+  }
+
+def postLabelAbout(code: String): String =
+  resolvePostKey(code) match {
+    case Some(k) =>
+      postLabels.get(k) match {
+        case Some(info) => info.about
+        case None => ""
+      }
+    case None => ""
+  }
+
+def accountLabelAbout(code: String): String =
+  resolveAccountKey(code) match {
+    case Some(k) =>
+      accountLabels.get(k) match {
+        case Some(info) => info.about
+        case None => ""
+      }
+    case None => ""
+  }
+
+def postLabelEffect(code: String): String =
+  resolvePostKey(code) match {
+    case Some(k) =>
+      postLabels.get(k) match {
+        case Some(info) => info.effect
+        case None => ""
+      }
+    case None => ""
+  }
+
+def accountLabelEffect(code: String): String =
+  resolveAccountKey(code) match {
+    case Some(k) =>
+      accountLabels.get(k) match {
+        case Some(info) => info.effect
+        case None => ""
+      }
+    case None => ""
+  }
+
+Library({
+  export = {
+    postLabels = postLabels,
+    postLabelAliases = postLabelAliases,
+    accountLabels = accountLabels,
+    normalizeLabel = normalizeLabel,
+    resolvePostKey = resolvePostKey,
+    resolveAccountKey = resolveAccountKey,
+    isPostLabel = isPostLabel,
+    isAccountLabel = isAccountLabel,
+    postLabelName = postLabelName,
+    accountLabelName = accountLabelName,
+    postLabelAbout = postLabelAbout,
+    accountLabelAbout = accountLabelAbout,
+    postLabelEffect = postLabelEffect,
+    accountLabelEffect = accountLabelEffect,
+    postTakedowns = postTakedowns,
+    accountTakedowns = accountTakedowns,
+    takedownLabelName = takedownLabelName,
+    isPostTakedownLabel = isPostTakedownLabel,
+    isAccountTakedownLabel = isAccountTakedownLabel,
+    postTakedownAbout = postTakedownAbout,
+    postTakedownEffect = postTakedownEffect,
+    accountTakedownAbout = accountTakedownAbout,
+    accountTakedownEffect = accountTakedownEffect,
+  },
+  description = PlainText(
+    "Under the Hood public label and takedown allowlists (canonical name -> about/effect) and helpers."
+  ),
+  contactInfo = sharedConfig.contactInfo,
+  lifecycle = Production,
+})

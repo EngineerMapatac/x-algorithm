@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 X.AI Corp.
+[project]
+name = "xai-recsys"
+version = "0.1.0"
+
+[build-system]
+build-backend = "maturin"
+requires = ["maturin>=1.7,<2.0"]
+
+[tool.maturin]
+bindings = "pyo3"
+features = ["pyo3/extension-module"]
+module-name = "xai_recsys"
+profile = "release"
+
+[tool.uv]
+cache-keys = [
+  { file = "**" },
+  { file = "../../../crates/serving/xai-recsys-proto/**" },
+]

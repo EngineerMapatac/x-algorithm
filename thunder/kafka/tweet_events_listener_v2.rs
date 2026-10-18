@@ -1,12 +1,12 @@
 use anyhow::Result;
 use log::{info, warn};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, Semaphore};
-use xai_kafka::{KafkaMessage, config::KafkaConsumerConfig, consumer::KafkaConsumer};
+use xai_kafka::{config::KafkaConsumerConfig, consumer::KafkaConsumer, KafkaMessage};
 
-use xai_thunder_proto::{LightPost, TweetDeleteEvent, in_network_event};
+use xai_thunder_proto::{in_network_event, LightPost, TweetDeleteEvent};
 
 use crate::{
     args::Args,
@@ -16,20 +16,18 @@ use crate::{
     posts::post_store::PostStore,
 };
 
-/// Counter for logging deserialization every Nth time
 static DESER_LOG_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-/// Start the tweet event processing loop in the background with configurable number of threads
 pub async fn start_tweet_event_processing_v2(
-    base_config: KafkaConsumerConfig,
+    base_config: impl Into<KafkaConsumerConfig>,
     post_store: Arc<PostStore>,
     args: &Args,
     tx: tokio::sync::mpsc::Sender<i64>,
 ) {
+    let base_config = base_config.into();
     let num_partitions = args.kafka_tweet_events_v2_num_partitions;
     let kafka_num_threads = args.kafka_num_threads;
 
-    // Use all available partitions
     let partitions_to_use: Vec<i32> = (0..num_partitions as i32).collect();
     let partitions_per_thread = num_partitions.div_ceil(kafka_num_threads);
 
@@ -41,7 +39,6 @@ pub async fn start_tweet_event_processing_v2(
     spawn_processing_threads_v2(base_config, partitions_to_use, post_store, args, tx);
 }
 
-/// Spawn multiple processing threads, each handling a subset of partitions
 fn spawn_processing_threads_v2(
     base_config: KafkaConsumerConfig,
     partitions_to_use: Vec<i32>,
@@ -52,8 +49,7 @@ fn spawn_processing_threads_v2(
     let total_partitions = partitions_to_use.len();
     let partitions_per_thread = total_partitions.div_ceil(args.kafka_num_threads);
 
-    // Create shared semaphore to prevent too many tweet_events partition updates at the same time
-    let semaphore = Arc::new(Semaphore::new(3));
+    let semaphore = Arc::new(Semaphore::new(1));
 
     for thread_id in 0..args.kafka_num_threads {
         let start_idx = thread_id * partitions_per_thread;
@@ -82,7 +78,6 @@ fn spawn_processing_threads_v2(
 
             match create_kafka_consumer(thread_config).await {
                 Ok(consumer) => {
-                    // Start partition lag monitoring for this thread's partitions
                     crate::kafka::tweet_events_listener::start_partition_lag_monitor(
                         Arc::clone(&consumer),
                         topic,
@@ -115,7 +110,6 @@ fn spawn_processing_threads_v2(
     }
 }
 
-/// Process a single batch of messages: deserialize, extract posts, and store them
 fn deserialize_batch(
     messages: Vec<KafkaMessage>,
 ) -> Result<(Vec<LightPost>, Vec<TweetDeleteEvent>)> {
@@ -166,7 +160,6 @@ fn deserialize_batch(
     Ok((create_tweets, delete_tweets))
 }
 
-/// Main message processing loop that polls Kafka, batches messages, and stores posts
 async fn process_tweet_events_v2(
     consumer: Arc<RwLock<KafkaConsumer>>,
     post_store: Arc<PostStore>,
@@ -205,22 +198,19 @@ async fn process_tweet_events_v2(
 
                 message_buffer.extend(messages);
 
-                // Process batch when we have enough messages
                 if message_buffer.len() >= batch_size {
                     batch_count += 1;
                     let messages = std::mem::take(&mut message_buffer);
                     let post_store_clone = Arc::clone(&post_store);
 
-                    // Acquire semaphore permit if init data is downloaded to allow enough CPU for serving requests
                     let permit = if init_data_downloaded {
                         Some(semaphore.clone().acquire_owned().await.unwrap())
                     } else {
                         None
                     };
 
-                    // Send batch to blocking thread pool for processing
                     let _ = tokio::task::spawn_blocking(move || {
-                        let _permit = permit; // Hold permit until task completes
+                        let _permit = permit;
                         match deserialize_batch(messages) {
                             Err(e) => warn!("Error processing batch {}: {:#}", batch_count, e),
                             Ok((light_posts, delete_posts)) => {

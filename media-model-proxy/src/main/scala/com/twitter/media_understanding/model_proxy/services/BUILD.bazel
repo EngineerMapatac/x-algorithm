@@ -1,0 +1,16 @@
+scala_library(
+    compiler_option_sets = ["fatal_warnings"],
+    dependencies = [
+        "cortex-deepbird/thrift/src/main/thrift:thrift-scala",
+        "decider",
+        "finagle/finagle-core",
+        "finagle/finagle-stats",
+        "finagle/finagle-thriftmux",
+        "media-understanding/media-model-proxy/src/main/scala/com/twitter/media_understanding/model_proxy/exception",
+        "media-understanding/media-model-proxy/src/main/scala/com/twitter/media_understanding/model_proxy/model_descriptors",
+        "media-understanding/media-model-proxy/src/main/thrift:thrift-scala",
+        "util/util-core",
+    ],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)

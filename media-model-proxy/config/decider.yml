@@ -1,0 +1,59 @@
+diffy_proxy_dark_traffic_rate:
+  comment: "Rate of Media Model Proxy traffic to forward to Diffy Proxy [0 (0%) to 10000 (100%)]"
+  default_availability: 0
+
+disable_adult_content_v1:
+  comment: "Disable the traffic to adult content model v1"
+  default_availability: 0
+
+disable_xx_nsfw_v1:
+  comment: "Disable the traffic to xx_nsfw model v1"
+  default_availability: 0
+
+disable_fingerprinting_v1:
+  comment: "Disable the traffic to fingerprinting model v1"
+  default_availability: 0
+
+disable_fingerprinting_v2:
+  comment: "Disable the traffic to fingerprinting model v2"
+  default_availability: 0
+
+disable_category_classification_v1:
+  comment: "Disable the traffic to category classification model v1"
+  default_availability: 0
+
+disable_category_classification_embeddings_v1:
+  comment: "Disable the traffic to category classification embeddings model v1"
+  default_availability: 0
+
+disable_hateful_symbol_recognition_v1:
+  comment: "Disable the traffic to hateful symbol recognition model v1"
+  default_availability: 0
+
+disable_violence_and_gore_v1:
+  comment: "Disable the traffic to violence and gore model v1"
+  default_availability: 0
+
+enable_load_shedding:
+  comment: "Use this to reject Thrift service requests"
+  default_availability: 0
+
+enable_gifs_for_category_classification:
+  comment: "Enable gif processing for the category classification model"
+  default_availability: 0
+
+enable_gifs_for_category_classification_embeddings:
+  comment: "Enable gif processing for the category classification embeddings model"
+  default_availability: 0
+
+enable_dummy_category_classification_embeddings:
+  comment: "Enable returning dummy embeddings for the Category Classification Embeddings model"
+  default_availability: 0
+
+enable_category_classification_embeddings_alt_dark_traffic:
+  comment: "Enable sending dark traffic to the alternate destination of the Category Classification Embeddings model"
+  default_availability: 0
+
+requests_scribe_sample_rate:
+  comment: "Rate at which requests are scribed [0 (0%) to 10000 (100%)]"
+  default_availability: 100

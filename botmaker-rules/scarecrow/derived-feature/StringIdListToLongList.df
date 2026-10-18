@@ -1,0 +1,5 @@
+description:\nexpression: |
+  params(String :delimitedString, String :delimiter = ",")
+  for (:entity in SplitString(:delimitedString, :delimiter)) { ToLong(:entity) }
+logged: 'false'
+returnType: Auto

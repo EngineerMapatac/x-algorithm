@@ -1,0 +1,40 @@
+id: '25026'
+description:\nevent: health_side_effect
+condition: |
+  Exists(userId) &&
+  Exists(spamScore) &&
+  Exists(postId) &&
+  healthSideEffectSubEvent == "groxScore" &&
+  spamScore >= 0.97 &&
+  !IsTestUser(userId)
+action: |
+  {
+    val :tweet = GetTweetOrNull(postId);
+    val :conversationId = :tweet.core_data.conversation_id;
+    val :convoAuthor = GetTweetAuthorId(:conversationId);
+    val :replyFromConvAuthor = (userId == :convoAuthor);
+    val :highPageRankOrAutoExpiringTempSkipListOrGrayVerified = {
+      IsHighPageRankUser(userId) ||
+      Contains(GetLongList(`AutoExpiringTempSkipList`), userId) ||
+      IsUserGrayVerified(userId)
+    };
+    IncrementStat("GroxProcessor/25026/AllGroxLabeled", 1);
+    if (!:replyFromConvAuthor && !:highPageRankOrAutoExpiringTempSkipListOrGrayVerified) {
+      IncrementStat("GroxProcessor/25026/AllGroxLabeled_RulePutLabel", 1);
+      Log("DownRankGroxFlaggedReply/RISKY_HIGH_VIZ_REPLY", TRUE);
+      IncrementStat("DownRankGroxFlaggedReply/RISKY_HIGH_VIZ_REPLY", 1);
+      SetTweetRtfApplyLabelWithExpirationMs(
+        "RISKY_HIGH_VIZ_REPLY",
+        postId,
+        CurrentTimeMs() + (OneDayInMillis * 14)
+      );
+    } else {
+      Log("GroxProcessor/25026/AllGroxLabeled_RuleSkipped", TRUE);
+      Log("GroxProcessor/25026/ReplyFromConvAuthor", :replyFromConvAuthor);
+      Log("GroxProcessor/25026/highPageRankOrAutoExpiringTempSkipListOrGrayVerified", :highPageRankOrAutoExpiringTempSkipListOrGrayVerified);
+      IncrementStat("GroxProcessor/25026/AllGroxLabeled_RuleSkippedTotal", 1);
+    }
+  }
+expiry: '2029-06-14T01:10:58.669Z'
+isActive: 'true'
+owner:\nactionLimits: {}

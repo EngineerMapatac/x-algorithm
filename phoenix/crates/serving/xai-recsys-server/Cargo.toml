@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 X.AI Corp.
+[package]
+edition.workspace = true
+name = "xai-recsys-server"
+version = "0.1.0"
+
+[dependencies]
+axum = { workspace = true }
+bytes = { workspace = true }
+env_logger = { workspace = true }
+fastrace.workspace = true
+fastrace-tonic.workspace = true
+futures = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+prometheus = { workspace = true }
+rustls = { workspace = true }
+tokio = { workspace = true }
+tokio-rustls = { workspace = true }
+tokio-util = { workspace = true }
+tonic = { workspace = true }
+tower = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

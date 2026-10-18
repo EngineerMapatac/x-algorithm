@@ -1,0 +1,7 @@
+description:\nexpression: |
+  params(Long :tweetId)
+  {
+    TryOrElse(GetTweet(:tweetId ), NULL) != NULL
+  }
+logged: 'false'
+returnType: BooleanValue

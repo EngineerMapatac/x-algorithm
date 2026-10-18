@@ -1,0 +1,43 @@
+id: '22418'
+description:\nevent: health_side_effect
+condition: |
+  healthSideEffectSubEvent == "nsfw_tweet_media"
+action: |
+  {
+    val :nearPerfect = if (
+      label == "3" &&
+      Exists(score) &&
+      score > 0.99
+    ) {
+      ApplyNsfwUserLabel(tweetId, "NSFW_NEAR_PERFECT", userId, "NearPerfectNsfwTweetMediaScore");
+    } else {
+      FALSE
+    }
+    val :highPrecision = if (
+      label == "3"
+    ) {
+      ApplyNsfwUserLabel(tweetId, "NSFW_HIGH_PRECISION", userId, "HighPrecisionNsfwTweetMediaScore");
+    } else {
+      FALSE
+    }
+    val :highRecall = if (
+      label == "4"
+    ) {
+      ApplyNsfwUserLabel(tweetId, "NSFW_HIGH_RECALL", userId, "HighRecallNsfwTweetMediaScore");
+    } else {
+      FALSE
+    }
+    val :labeledUser = :nearPerfect || :highPrecision || :highRecall;
+    if (:labeledUser) {
+      val :guanoNote = Concat(
+        "Bot Id: ", ToString(RULE_ID),
+        ", applied NSFW label to user because their post was detected as NSFW",
+        ", Tweet Id: ", ToString(tweetId),
+        ", Tweet Detection Source: ", label
+      );
+      AddGuanoNote(userId, TwitterSafetyUserId, :guanoNote);
+    };
+  }
+expiry: '2032-08-31T08:41:48.520Z'
+isActive: 'true'
+owner:\nactionLimits: {}

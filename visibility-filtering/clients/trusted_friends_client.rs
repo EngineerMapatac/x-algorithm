@@ -1,0 +1,155 @@
+use anyhow::{bail, Result};
+use std::iter;
+use thrift::protocol::{
+    TFieldIdentifier, TInputProtocol, TOutputProtocol, TSerializable, TStructIdentifier, TType,
+};
+use thrift::{new_protocol_error, ProtocolErrorKind};
+use xai_strato::strato_thrift::{strato_decode, StratoResult};
+use xai_strato::{encode, MValCodec, StratoGrpc};
+
+const IS_MEMBER_COLUMN: &str = "trusted-friends/visibility-filtering/isMember.TrustedFriendsList";
+const IS_OWNER_COLUMN: &str = "trusted-friends/visibility-filtering/isOwner.TrustedFriendsList";
+
+pub struct TrustedFriendsClient {
+    grpc: StratoGrpc,
+}
+
+impl TrustedFriendsClient {
+    pub fn new(grpc: StratoGrpc) -> Self {
+        Self { grpc }
+    }
+
+    pub async fn batch_is_member_or_owner(
+        &self,
+        viewer_id: u64,
+        list_ids: &[u64],
+    ) -> Vec<Result<bool>> {
+        let calls = list_ids
+            .iter()
+            .flat_map(|&list_id| {
+                let key = key(list_id, viewer_id);
+                [IS_MEMBER_COLUMN, IS_OWNER_COLUMN]
+                    .map(|column| (column.to_string(), "fetch".to_string(), vec![key.clone()]))
+            })
+            .collect();
+        let mut answers = self
+            .grpc
+            .batch_call(calls, None)
+            .await
+            .into_iter()
+            .map(|bytes| decode_answer(&bytes?));
+        iter::from_fn(|| Some(member_or_owner(answers.next()?, answers.next()?))).collect()
+    }
+}
+
+pub(crate) fn key(list_id: u64, viewer_id: u64) -> Vec<u8> {
+    let view = View {
+        user_id: viewer_id.cast_signed(),
+    };
+    encode(&(list_id.cast_signed(), &view))
+}
+
+fn member_or_owner(member: Result<bool>, owner: Result<bool>) -> Result<bool> {
+    match (member, owner) {
+        (Ok(true), _) | (_, Ok(true)) => Ok(true),
+        (Err(error), _) | (_, Err(error)) => Err(error),
+        (Ok(false), Ok(false)) => Ok(false),
+    }
+}
+
+fn decode_answer(bytes: &[u8]) -> Result<bool> {
+    match strato_decode::<Answer>(bytes)? {
+        StratoResult::Ok { value, .. } => Ok(value.is_some_and(|Answer(answer)| answer)),
+        StratoResult::Err { code, message } => bail!("Strato error (code {code}): {message}"),
+    }
+}
+
+struct View {
+    user_id: i64,
+}
+
+const USER_ID_FIELD: i16 = 11846;
+
+impl MValCodec for View {
+    fn thrift_type() -> TType {
+        TType::Struct
+    }
+
+    #[expect(clippy::unimplemented, reason = "a view is only encoded")]
+    fn from_thrift(_proto: &mut dyn TInputProtocol) -> Self {
+        unimplemented!("a view is only encoded")
+    }
+
+    #[expect(
+        clippy::unwrap_used,
+        reason = "`xai_strato::encode` writes into a Vec, which cannot fail"
+    )]
+    fn to_thrift(&self, proto: &mut dyn TOutputProtocol) {
+        proto
+            .write_struct_begin(&TStructIdentifier::new("View"))
+            .unwrap();
+        proto
+            .write_field_begin(&TFieldIdentifier::new("userId", TType::I64, USER_ID_FIELD))
+            .unwrap();
+        proto.write_i64(self.user_id).unwrap();
+        proto.write_field_end().unwrap();
+        proto.write_field_stop().unwrap();
+        proto.write_struct_end().unwrap();
+    }
+}
+
+struct Answer(bool);
+
+impl TSerializable for Answer {
+    fn read_from_in_protocol(i_prot: &mut dyn TInputProtocol) -> thrift::Result<Self> {
+        Ok(Self(i_prot.read_bool()?))
+    }
+
+    fn write_to_out_protocol(&self, _o_prot: &mut dyn TOutputProtocol) -> thrift::Result<()> {
+        Err(new_protocol_error(
+            ProtocolErrorKind::NotImplemented,
+            "Answer is decode-only",
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clients::strato_answer::{found, no_row, Thrift};
+    use anyhow::anyhow;
+
+    fn answer(value: Option<bool>) -> bool {
+        let bytes = value.map_or_else(no_row, |value| found(Thrift::Bool(value)));
+        decode_answer(&bytes).unwrap()
+    }
+
+    #[test]
+    fn the_key_names_the_list_and_the_viewer_as_userid() {
+        assert_eq!(
+            key(9001, 50),
+            [
+                0x0c, 0x00, 0x04, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x23, 0x29,
+                0x0c, 0x00, 0x01, 0x0a, 0x2e, 0x46, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x32,
+                0x00, 0x00, 0x00,
+            ]
+        );
+    }
+
+    #[test]
+    fn the_column_answer_decodes_and_a_missing_value_answers_false() {
+        assert!(answer(Some(true)));
+        assert!(!answer(Some(false)));
+        assert!(!answer(None));
+    }
+
+    #[test]
+    fn either_column_answering_true_shows_and_otherwise_a_failure_fails() {
+        let failed = || Err(anyhow!("unavailable"));
+        assert!(member_or_owner(Ok(true), failed()).unwrap());
+        assert!(member_or_owner(failed(), Ok(true)).unwrap());
+        assert!(!member_or_owner(Ok(false), Ok(false)).unwrap());
+        assert!(member_or_owner(Ok(false), failed()).is_err());
+        assert!(member_or_owner(failed(), Ok(false)).is_err());
+    }
+}

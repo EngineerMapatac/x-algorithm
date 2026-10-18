@@ -1,0 +1,22 @@
+import <hydra/sharedConfig>
+
+type PhoenixRankAllIndexingRequest = com.twitter.strato.columns.hydra.PhoenixRankAllIndexingRequest
+
+val accessPolicy = AnyOf(Seq(
+  FromColumns(Set(Path("hydra/favoriteEventProcessor"))),
+  sharedConfig.adminPolicy
+))
+
+Managed({
+  source = KafkaColumn({
+    topic = "phoenix_rankall_fav_event",
+    dest = "/s/kafka/main-2:kafka-tls",
+    mapping = ValueOnly({
+      value = Type(PhoenixRankAllIndexingRequest),
+      encoding = ThriftEncoding
+    })
+  }),
+  contactInfo = Some(sharedConfig.contactInfo),
+  accessPolicy = accessPolicy,
+  lifecycle = Development
+})

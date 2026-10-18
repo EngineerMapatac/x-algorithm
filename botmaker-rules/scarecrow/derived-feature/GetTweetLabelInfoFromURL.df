@@ -1,0 +1,30 @@
+description:\nexpression: |
+  params(String :url, String :labelType, Boolean :withIds)
+  {
+    val :tcos = GetSlugsForUrl(:url, 1);
+    val :ids = for (:t in :tcos) { Last(SplitString(:t, "/")) };
+    val :tweetIds = ToList(GetTweetIdsForSlugs(:ids));
+
+    val :total = Size(:tweetIds);
+    val :interstitialed = Filter(:tweetId, Contains(TryOrElse(GetTweetRtfLabels(:tweetId), List()), :labelType), :tweetIds);
+    val :notInterstitialed = Filter(:t, !Contains(:interstitialed, :t) && IsTweetFound(:t), :tweetIds);
+
+    if (:withIds) {
+      ToDict(
+        "total", :total,
+        "labeledSize", Size(:interstitialed),
+        "notLabeledSize", Size(:notInterstitialed),
+        "tweetIds", :tweetIds,
+        "labeled", :interstitialed,
+        "notLabeled", :notInterstitialed
+      );
+    } else {
+      ToDict(
+        "total", :total,
+        "labeledSize", Size(:interstitialed),
+        "notLabeledSize", Size(:notInterstitialed)
+      );
+    }
+  }
+logged: 'false'
+returnType: DoubleMapValue

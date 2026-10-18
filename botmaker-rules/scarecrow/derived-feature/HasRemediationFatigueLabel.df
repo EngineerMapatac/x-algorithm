@@ -1,0 +1,7 @@
+description:\nexpression: |
+  params(String :key){
+    val :namespace = CreateRemediationFatigueNamespace;
+    HasLabel(:namespace, :key)
+  }
+logged: 'false'
+returnType: BooleanValue

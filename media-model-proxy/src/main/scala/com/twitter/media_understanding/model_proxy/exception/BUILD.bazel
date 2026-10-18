@@ -1,0 +1,13 @@
+scala_library(
+    compiler_option_sets = ["fatal_warnings"],
+    dependencies = [
+        "finagle/finagle-core/src/main",
+        "media-understanding/media-model-proxy/src/main/thrift:thrift-scala",
+        "mediaservices/commons",
+        "mediaservices/commons/src/main/thrift:thrift-scala",
+        "util/util-core:scala",
+        "videobird/thrift:thrift-scala",
+    ],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)

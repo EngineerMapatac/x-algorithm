@@ -1,0 +1,17 @@
+junit_tests(
+    compiler_option_sets = ["fatal_warnings"],
+    dependencies = [
+        "3rdparty/jvm/ch/qos/logback:logback-classic",
+        "3rdparty/jvm/com/google/inject:guice",
+        "3rdparty/jvm/net/codingwell:scala-guice",
+        "3rdparty/jvm/org/scalatest",
+        "3rdparty/jvm/org/scalatestplus:junit",
+        "media-understanding/common:logback-test",
+        "media-understanding/common/src/test/scala/com/twitter/media_understanding/common/config:test-deps",
+        "media-understanding/media-model-proxy/src/main/scala/com/twitter/media_understanding/model_proxy/config",
+        "twitter-server-internal/src/main/scala",
+    ],
+    runtime_platform = "java11",
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)

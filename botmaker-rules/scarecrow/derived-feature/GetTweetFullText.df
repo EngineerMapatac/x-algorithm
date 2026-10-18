@@ -1,0 +1,10 @@
+description:\nexpression: |
+  params(Long :tweetId)
+  {
+    val :tweet = GetTweet(:tweetId);
+    Assert(:tweet != NULL, Concat("Tweet not found for tweet id: ", ToString(:tweetId)));
+    Assert(:tweet.core_data.text != NULL, Concat("Tweet text not set for tweet id: ", ToString(:tweetId)));
+    :tweet.core_data.text
+  }
+logged: 'false'
+returnType: StrValue

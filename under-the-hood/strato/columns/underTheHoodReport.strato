@@ -1,0 +1,30 @@
+import <visibility/under-the-hood/sharedConfig>
+import <visibility/under-the-hood/params>
+
+type Key = Unit
+type View = Unit
+type Value = com.twitter.strato.graphql.UnderTheHoodReport
+
+val fetchOp = Op.fetch[Key, View, Value] { ctx =>
+  CallContext.authenticatedTwitterUserId() match {
+    case Some(userId) =>
+      if (params.underTheHoodReportEnabled()) {
+        Ok(#User<visibility/under-the-hood/underTheHoodReport>.fetch(userId, ()))
+      } else {
+        Ok.missing
+      }
+    case None =>
+      Ok.missing
+  }
+}
+
+Managed({
+  source = QueryColumn({ ops = Map(Fetch -> fetchOp) }),
+  contactInfo = Some(sharedConfig.contactInfo),
+  lifecycle = Production,
+  accessPolicy = AllowTwitterUserId,
+  description = PlainText(
+    "Under the Hood transparency report for the authenticated viewer. " +
+      "Gated by under_the_hood_report_enabled; delegates to underTheHoodReport.User."
+  ),
+})

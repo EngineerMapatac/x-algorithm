@@ -1,0 +1,27 @@
+import <hydra/sharedConfig>
+
+type Key = Long
+type Value = com.twitter.strato.columns.hydra.TweetUpdateTriggerInfo
+
+val accessPolicy = AnyOf(Seq(
+  FromColumns(Set(
+    Path("hydra/favoriteEventProcessor")
+  )),
+  sharedConfig.adminPolicy
+))
+
+Managed({
+  source = MemcacheColumn({
+    dest = "/srv#/prod/local/cache/hydra_streaming_eng_counts:twemcaches",
+    keyPrefix = "",
+    key = Type(Long),
+    value = Type(Value),
+    ttl = 50.hours,
+  }),
+  contactInfo = Some(sharedConfig.contactInfo),
+  lifecycle = Production,
+  description = PlainText("Cache storing each tweet's fav threshold for triggering a new event"),
+  accessPolicy = accessPolicy
+})
+
+

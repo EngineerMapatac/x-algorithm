@@ -1,0 +1,687 @@
+import <hydra/sharedConfig>
+import <hydra/curatedAuthorLists>
+import <hydra/authorCategoryConstants>
+
+type TriggerInfo = com.twitter.strato.columns.hydra.TweetUpdateTriggerInfo
+type EngagementCount = com.twitter.strato.columns.hydra.EngagementCount
+type RepeatGenerationEvent = com.twitter.strato.columns.hydra.RepeatGenerationEvent
+type PostAnnotations = com.twitter.strato.columns.content_understanding.PostAnnotations
+type UnifiedPostAnnotations = com.twitter.strato.columns.content_understanding.UnifiedPostAnnotations
+type TweetypieResponse = {
+  hasVideo: Option[Boolean],
+  hasEligibleMedia: Boolean,
+  favoriteCount: Option[Long],
+  replyRootPostId: Option[Long]
+}
+type UecAggTotalRequest = com.twitter.strato.graphql.unified_counter.UecAggTotalRequest
+type AuthorMetadata = com.twitter.strato.columns.content_understanding.content_exploration.AuthorMetadata
+type Tweet = com.twitter.tweetypie.Tweet
+
+type PostType = com.twitter.strato.columns.content_understanding.content_exploration.PostType
+type PostTypeWithMetadata = com.twitter.strato.columns.content_understanding.content_exploration.PostTypeWithMetadata
+
+val acceptedVideoTypes: Set[com.twitter.mediaservices.commons.MediaCategory] = Set(TweetVideo, AmplifyVideo)
+val minLongVideoDurationMillis = 10 * 1000
+
+
+
+val maxTimeSinceFirstUpdate = 48.hours.inMillis
+
+val minTimeSinceLatestUpdate = 1.minute.inMillis
+
+val maxTweetAge = 49.hours.inMillis
+
+val maxEngagements = 1073741824L
+
+val minEngagements = 32L
+
+def checkTweetAgedOut(tweetCreatedAtMsec: Long): Boolean = {
+  Time.now.inMillis - tweetCreatedAtMsec >= maxTweetAge
+}
+
+def checkCachedTweetNewFavEventShouldTrigger(
+  tweetId: Long,
+  tweetEngCount: Long,
+  tweetCreatedAtMsec: Option[Long],
+  latest: TriggerInfo
+): Boolean = {
+  val now = Time.now.inMillis
+  val updatedRecently = now - latest.lastUpdateMsec < minTimeSinceLatestUpdate
+  val engagementsAgedOut = now - latest.firstUpdateMsec > maxTimeSinceFirstUpdate
+  val tweetAgedOut = checkTweetAgedOut(tweetCreatedAtMsec.getOrElse(0L))
+  val belowMaxEngagements = tweetEngCount < maxEngagements
+  val passedThreshold = tweetEngCount >= latest.nextTriggerThreshold
+
+  !engagementsAgedOut
+  && !tweetAgedOut
+  && passedThreshold
+  && belowMaxEngagements
+  && !updatedRecently
+}
+
+def checkUncachedTweetNewFavEventShouldTrigger(
+  tweetId: Long,
+  tweetEngCount: Long,
+  tweetCreatedAtMsec: Option[Long]
+): Boolean = {
+  val tweetAgedOut = checkTweetAgedOut(tweetCreatedAtMsec.getOrElse(0L))
+  val belowMaxEngagements = tweetEngCount < maxEngagements
+  !tweetAgedOut && belowMaxEngagements
+}
+
+def checkCachedTweetRepeatFavEventShouldTrigger(
+  tweetId: Long,
+  tweetCreatedAtMsec: Option[Long],
+  latest: TriggerInfo
+): Boolean = {
+  val now = Time.now.inMillis
+  val updatedRecently = now - latest.lastUpdateMsec < minTimeSinceLatestUpdate
+  val engagementsAgedOut = now - latest.firstUpdateMsec > maxTimeSinceFirstUpdate
+  val tweetAgedOut = checkTweetAgedOut(tweetCreatedAtMsec.getOrElse(0L))
+  !engagementsAgedOut
+  && !tweetAgedOut
+  && !updatedRecently
+}
+
+def checkCachedTweetRepeatFavEventShouldRepeat(
+  tweetId: Long,
+  tweetCreatedAtMsec: Option[Long],
+  latest: TriggerInfo
+): Boolean = {
+  val now = Time.now.inMillis
+  val engagementsAgedOut = now - latest.firstUpdateMsec > maxTimeSinceFirstUpdate
+  val tweetAgedOut = checkTweetAgedOut(tweetCreatedAtMsec.getOrElse(0L))
+
+  !engagementsAgedOut && !tweetAgedOut
+}
+
+def checkUncachedTweetRepeatFavEventShouldTrigger(
+  tweetId: Long,
+  tweetCreatedAtMsec: Option[Long]
+): Boolean = {
+  val tweetAgedOut = checkTweetAgedOut(tweetCreatedAtMsec.getOrElse(0L))
+  !tweetAgedOut
+}
+
+def checkPassMinFavCount(
+  tweetEngCount: Long
+): Boolean = {
+  tweetEngCount >= minEngagements
+}
+
+def repeatGenEvent(
+  tweetId: Long,
+  originalEventTimeMsec: Long,
+  tweetCreatedAtMsec: Option[Long]
+): RepeatGenerationEvent = {
+  {
+    tweetId = tweetId,
+    originalEventTimeMs = originalEventTimeMsec,
+    lastEventProcessTimeMs = Time.now.inMillis,
+    tweetCreatedAtMs = tweetCreatedAtMsec
+  }
+}
+
+def isMediaEligible(mediaEntity: com.twitter.tweetypie.MediaEntity) : Boolean = {
+
+  val isLongVideo = mediaEntity.mediaInfo match {
+    case Some(mediaInfo) => mediaInfo match {
+        case VideoInfo(videoInfo) => videoInfo.durationMillis > minLongVideoDurationMillis
+        case _ => false
+      }
+    case _ => false
+  }
+
+  val isNotNsfw = !(mediaEntity.nsfw)
+
+  (isLongVideo && isNotNsfw)
+}
+
+def videoDurationMs(tweet: com.twitter.tweetypie.Tweet): Option[Long] = {
+  tweet.media.flatMap { entities =>
+    entities.flatMap { entity =>
+      entity.mediaInfo match {
+        case Some(VideoInfo(videoInfo)) => Some(videoInfo.durationMillis)
+        case _ => None
+      }
+    }.headOption
+  }
+}
+
+def hasVideo(mediaEntity: com.twitter.tweetypie.MediaEntity) : Boolean = {
+  mediaEntity.mediaKey.map {
+    key => acceptedVideoTypes.contains(key.mediaCategory)
+  }.getOrElse(false)
+}
+
+def isAuthorEligible(tweet: com.twitter.tweetypie.Tweet) : Boolean = {
+  tweet.coreData.map {
+    coreData => (coreData.nsfwUser == false) && (coreData.nsfwAdmin == false)
+  }.getOrElse(true)
+}
+
+def isAuthorVisible(tweet: com.twitter.tweetypie.Tweet): Boolean = {
+  tweet.coreData match {
+    case Some(coreData) => {
+        coreData.user["gizmoduck/core.User"] match {
+          case Some(_) => true
+          case _ => false
+        }
+      }
+    case _ => false
+  }
+}
+
+def isRepost(tweet: com.twitter.tweetypie.Tweet): Boolean = {
+  tweet.coreData match {
+    case Some(data) => data.share.nonEmpty
+    case _ => false
+  }
+}
+
+def getTweetypieResponse(tweetId: Long): TweetypieResponse = {
+  val (pureCoreDataOpt, mediaEntitiesOpt, nsfwUserOpt, nsfwAdminOpt, favCountOpt) = (
+    #Tweet<tweetypie/federated/pureCoreData>.fetch(tweetId, ()).v,
+    #Tweet<tweetypie/federated/mediaEntities>.fetch(tweetId, ()).v,
+    #Tweet<tweetypie/federated/nsfwUser>.fetch(tweetId, ()).v,
+    #Tweet<tweetypie/federated/nsfwAdmin>.fetch(tweetId, ()).v,
+    #Tweet<tweetypie/federated/favoritesCount>.fetch(tweetId, ()).v
+  )
+
+  pureCoreDataOpt.map { coreData =>
+    val isNsfwAuthor = nsfwUserOpt.getOrElse(false) || nsfwAdminOpt.getOrElse(false)
+    {
+      hasVideo = mediaEntitiesOpt.map { entities =>
+        entities.exists { entity => hasVideo(entity) }
+      },
+      hasEligibleMedia = mediaEntitiesOpt.map { entities =>
+        entities.exists { entity => hasVideo(entity) }
+        && entities.forall { entity => isMediaEligible(entity) }
+      }.getOrElse(false) && !isNsfwAuthor,
+      favoriteCount = favCountOpt,
+      replyRootPostId = coreData.conversation,
+    }
+  }.getOrElse({hasVideo=Some(false), hasEligibleMedia=false, favoriteCount=Some(0L), replyRootPostId=None})
+}
+
+def getPostMetadataLightweight(postId: Long): Option[Tweet] = {
+  val (pureCoreDataOpt, mediaEntitiesOpt, communitiesOpt) = (
+    #Tweet<tweetypie/federated/pureCoreData>.fetch(postId, ()).v,
+    #Tweet<tweetypie/federated/mediaEntities>.fetch(postId, ()).v,
+    #Tweet<tweetypie/federated/communities>.fetch(postId, ()).v
+  )
+
+  pureCoreDataOpt.map { data =>
+    {
+      id = postId,
+      coreData = Some({
+        user = data.user,
+        text = data.text,
+        createdAtSecs = data.createdAtSecs,
+        createdVia = data.createdVia,
+        reply = data.reply,
+        share = data.share,
+      }: com.twitter.tweetypie.TweetCoreData),
+      media = mediaEntitiesOpt,
+      communities = communitiesOpt,
+    }: Tweet
+  }
+}
+
+def getUnifiedPostAnnotations(postId: Long): Option[UnifiedPostAnnotations] =
+  #<content_understanding/internal/manhattan/unifiedPostUnderstandingMh>.fetch(postId, ()).v
+
+def getAuthorId(post: Tweet): Option[Long] = {
+  post.coreData.map { core => core.user }
+}
+
+def isReply(post: Tweet): Boolean = {
+  post.coreData.map { core => core.reply.nonEmpty }.getOrElse(false)
+}
+
+def isSelfReply(post: Tweet): Boolean = {
+  post.coreData.map { core =>
+    core.reply.map { reply => reply.inReplyToUser == core.user }.getOrElse(false)
+  }.getOrElse(false)
+}
+
+def inReplyToPostId(post: Tweet): Option[Long] = {
+  post.coreData.flatMap { core => core.reply.flatMap { reply => reply.inReplyToStatus } }
+}
+
+def hasMinFavoriteCount(engagementCount: Option[EngagementCount], minFavorites: Long): Boolean = {
+  engagementCount.flatMap { ec => ec.favoriteCount }.getOrElse(0L) >= minFavorites
+}
+
+def isCommunityPost(post: Tweet): Boolean = {
+  post.communities.nonEmpty
+}
+
+def shouldDropPostByVF(postId: Long): Boolean = {
+  val useRust = try {
+    #<visibility/decider>.fetch("enable_vf_rust_should_drop_tweet", None).v.getOrElse(false)
+  } catch {
+    case _ => false
+  }
+  if (useRust) {
+    val verdictOpt = try {
+      #<visibility/xai/shouldDropTweet>
+        .fetch(postId, { safetyLevel = TimelineHomeRecommendations }).v
+    } catch {
+      case _ => None
+    }
+    verdictOpt.getOrElse(false)
+  } else {
+    #Tweet<visibility/service/shouldDropTweetV2>
+      .fetch(postId, { safetyLevel = TimelineHomeRecommendations, forUserId = None }).v
+      .getOrElse(false)
+  }
+}
+
+def getEngagementCount(tweetId: Long): Option[EngagementCount] = {
+  val engagementsOpt =
+    #Tweet<unified-counter/service/UecAggTotal>.fetch(
+      tweetId,
+      {
+        engagements = Some(Seq(Retweet, Reply, Fav, QuoteTweet, Bookmark, Displayed, NotInterested, Report, Block)),
+        dataVersion = Some(Safe)
+      }).v
+  val engagementsMap = engagementsOpt.map{engagements => engagements.engagements.map {engagement => (engagement.engagementType, engagement.count)}.toMap}.getOrElse(Map.empty)
+
+  Some({
+    retweetCount = engagementsMap.get(Retweet),
+    replyCount = engagementsMap.get(Reply),
+    favoriteCount = engagementsMap.get(Fav),
+    quoteCount = engagementsMap.get(QuoteTweet),
+    bookmarkCount = engagementsMap.get(Bookmark),
+    viewCount = engagementsMap.get(Displayed),
+    notInterestedInCount = engagementsMap.get(NotInterested),
+    reportCount = engagementsMap.get(Report),
+    blockCount = engagementsMap.get(Block)
+  })
+}
+
+def getUnifiedPostContentCategories(unifiedPostAnnotationsOpt: Option[UnifiedPostAnnotations]): Seq[Long] = {
+  unifiedPostAnnotationsOpt.map { unifiedPostAnnotations =>
+    unifiedPostAnnotations.entities.getOrElse(Seq.empty).map {
+      category => (category.score.getOrElse(0.0), category.qualifiedId.entityId)
+    }.sortBy { v => v }.map {
+      v => v._2
+    }.filter { v => v % 10000 == 0 }
+  }.getOrElse(Seq.empty)
+}
+
+def getUnifiedPostTopicEntityIds(unifiedPostAnnotationsOpt: Option[UnifiedPostAnnotations]): Seq[Long] = {
+  unifiedPostAnnotationsOpt.map { annotatedPost =>
+    annotatedPost.entities.getOrElse(Seq.empty).map { entity =>
+      entity.qualifiedId.entityId
+    }
+  }.getOrElse(Seq.empty)
+}
+
+def isAdultPost(unifiedPostAnnotationsOpt: Option[UnifiedPostAnnotations]): Boolean = {
+  unifiedPostAnnotationsOpt match {
+    case Some(postAnnotations) => postAnnotations.tweetBoolMetadata match {
+        case Some(metadata) => metadata.isNsfw.getOrElse(false) || metadata.isAdult.getOrElse(false)
+        case None => false
+      }
+    case None => false
+  }
+}
+
+def isNsfwPost(unifiedPostAnnotationsOpt: Option[UnifiedPostAnnotations]): Boolean = {
+  unifiedPostAnnotationsOpt match {
+    case Some(postAnnotations) => postAnnotations.tweetBoolMetadata match {
+        case Some(metadata) => metadata.isNsfw.getOrElse(false)
+        case None => false
+      }
+    case None => false
+  }
+}
+
+val userQueryFields: Set[com.twitter.gizmoduck.QueryFields] = Set(Counts)
+
+def createAuthorMetadata(authorIdOpt: Option[Long]): Option[AuthorMetadata] = {
+  authorIdOpt.flatMap {authorId => #User<gizmoduck/composite>.fetch(authorId, ((), userQueryFields)).v}
+    .map {user => {
+        userId = user.id,
+        followerCount = user.counts.map { c => c.followers },
+        followingCount = user.counts.map { c => c.following },
+        createdAtMsec = Some(user.createdAtMsec),
+      }
+    }
+}
+
+def createPKeyForCategoryColdStartManhattan(indexVersion: String, tier: String, levelTwoCategoryId: Long) : String = {
+  indexVersion + "_" + tier + "_" + levelTwoCategoryId.toString
+}
+
+def postOptContainsVideo(postOpt: Option[Tweet]): Boolean = {
+  postOpt match {
+    case Some(post) =>
+      post.media.map {media => media.map {
+          oneMedia => oneMedia.mediaInfo match {
+              case Some(VideoInfo(videoInfo)) => true
+              case Some(AnimatedGifInfo(animatedGifInfo)) => true
+              case _ => false
+            }
+        }}.getOrElse(Seq.empty).contains(true)
+    case _ => false
+  }
+}
+
+def getAuthorFollowers(tweet: com.twitter.tweetypie.Tweet): Long = {
+  tweet.coreData match {
+    case Some(coreData) => {
+        coreData.user["socialgraph/serviceV2/followerCount.User"] match {
+          case Some(count) => count
+          case _ => 0L
+        }
+      }
+    case _ => 0L
+  }
+}
+
+def isImaginePost(tweet: com.twitter.tweetypie.Tweet): Boolean = {
+  tweet.media.map {
+    entities => entities.exists {
+      entity => entity.additionalMetadata.flatMap { metadata => metadata.grokPostId }.nonEmpty
+    }
+  }.getOrElse(false)
+}
+
+def hasImmersiveVideo(tweet: com.twitter.tweetypie.Tweet): Boolean = {
+  tweet.media.map {
+    entities => entities.exists {
+        entity => entity.mediaKey.map {
+            key => acceptedVideoTypes.contains(key.mediaCategory)
+          }.getOrElse(false)
+      }
+  }.getOrElse(false)
+}
+
+def hasValidImmersiveVideo(tweet: com.twitter.tweetypie.Tweet): Boolean = {
+  tweet.media.map {
+    entities =>
+      entities.exists { entity => hasVideo(entity) } &&
+      entities.forall { entity =>
+        val isAcceptedVideoType = entity.mediaKey.map {
+          key => acceptedVideoTypes.contains(key.mediaCategory)
+        }.getOrElse(false)
+        val isLongEnough = entity.mediaInfo match {
+          case Some(VideoInfo(videoInfo)) => videoInfo.durationMillis > minLongVideoDurationMillis
+          case _ => false
+        }
+        isAcceptedVideoType && isLongEnough
+      }
+  }.getOrElse(false)
+}
+
+def mediaContainsVideo(mediaOpt: Option[Seq[com.twitter.tweetypie.MediaEntity]]): Boolean = {
+  mediaOpt.map { media =>
+    media.exists { oneMedia => oneMedia.mediaInfo match {
+        case Some(VideoInfo(videoInfo)) => true
+        case Some(AnimatedGifInfo(animatedGifInfo)) => true
+        case _ => false
+      }
+    }
+  }.getOrElse(false)
+}
+
+def eitherPostOrQuoteHasVideo(postId: Long): Boolean = {
+  val (mediaEntitiesOpt, quotedTweetOpt) = (
+    #Tweet<tweetypie/federated/mediaEntities>.fetch(postId, ()).v,
+    #Tweet<tweetypie/federated/quotedTweet>.fetch(postId, ()).v
+  )
+
+  val quotedMediaOpt = quotedTweetOpt.flatMap { qt =>
+    #Tweet<tweetypie/federated/mediaEntities>.fetch(qt.tweet, ()).v
+  }
+
+  mediaContainsVideo(mediaEntitiesOpt) || mediaContainsVideo(quotedMediaOpt)
+}
+
+
+def isAuthorInCategoryForExperiment(authorId: Long, localCategory: String, experimentOption: Int): Boolean = {
+  experimentOption match {
+    case 1 => curatedAuthorLists.isAuthorInV0Category(authorId, localCategory)
+    case 2 => curatedAuthorLists.isAuthorInV1Category(authorId, localCategory)
+    case _ => false
+  }
+}
+
+def getLocalCategoriesForTopicEntityId(topicEntityId: Long): Seq[String] = {
+  authorCategoryConstants.getLocalCategoriesForXAICategory(topicEntityId)
+}
+
+def filterTopicEntityIdsForAuthor(
+  topicEntityIds: Seq[Long],
+  authorId: Long,
+  experimentOption: Int
+): Seq[Long] = {
+  val authorCategories: Set[String] = experimentOption match {
+    case 1 => curatedAuthorLists.getAuthorV0Categories(authorId)
+    case 2 => curatedAuthorLists.getAuthorV1Categories(authorId)
+    case _ => Set.empty[String]
+  }
+  
+  topicEntityIds.filter { topicEntityId =>
+    val localCategories = getLocalCategoriesForTopicEntityId(topicEntityId)
+    localCategories.exists { localCategory => authorCategories.contains(localCategory) }
+  }
+}
+
+
+val numRecentPostsToAnalyze = 15
+
+val thresholdOption3 = 0.90
+val thresholdOption4 = 0.75
+val thresholdOption5 = 0.50
+
+def getAuthorRecentOriginalAndQuotePosts(authorId: Long): Seq[PostTypeWithMetadata] = {
+  val recentEngagedTweetsOpt = #((authorId, 0L))["recommendations/twistly/userRecentEngagedTweets"]
+
+  recentEngagedTweetsOpt match {
+    case Some(response) =>
+      val filteredPosts: Seq[PostTypeWithMetadata] = response.recentEngagedTweets.flatMap { tweet =>
+        tweet.engagementMetadata match {
+          case OriginalTweetMetadata(metadata) =>
+            Some({
+              postType = TypeOriginal,
+              postId = tweet.tweetId,
+              postAuthor = Some(authorId),
+              inReactionToAuthorId = None,
+              inReactionToPostId = None,
+              createdAt = Some(tweet.engagedAt)
+            }: PostTypeWithMetadata)
+          case RetweetMetadata(metadata) =>
+            if (metadata.isQuotedTweet) {
+              Some({
+                postType = TypeQuote,
+                postId = metadata.retweetId,
+                postAuthor = Some(authorId),
+                inReactionToAuthorId = Some(metadata.sourceTweetUserId),
+                inReactionToPostId = Some(tweet.tweetId),
+                createdAt = Some(tweet.engagedAt)
+              }: PostTypeWithMetadata)
+            } else {
+              None
+            }
+          case _ => None
+        }
+      }
+
+      filteredPosts
+        .sortBy { p => -p.createdAt.getOrElse(0L) }
+        .take(numRecentPostsToAnalyze)
+    case None => Seq.empty
+  }
+}
+
+def getPostCategories(postId: Long): Set[String] = {
+  val annotationsOpt = getUnifiedPostAnnotations(postId)
+  val topicEntityIds = getUnifiedPostTopicEntityIds(annotationsOpt)
+  
+  topicEntityIds.map { topicEntityId =>
+    getLocalCategoriesForTopicEntityId(topicEntityId)
+  }.flatten.toSet
+}
+
+def calculateAuthorCategoryPercentages(authorId: Long): Map[String, Double] = {
+  val posts = getAuthorRecentOriginalAndQuotePosts(authorId)
+  
+  if (posts.isEmpty) {
+    Map.empty
+  } else {
+    val totalPosts = posts.foldLeft(0) { (acc, post) => acc + 1 }.toDouble
+    
+    val allCategories: Seq[String] = posts.map { post =>
+      getPostCategories(post.postId).toSeq
+    }.flatten
+    
+    val categoryCounts: Map[String, Int] = allCategories.groupBy { x => x }.map { case (cat, occurrences) => 
+      (cat, occurrences.foldLeft(0) { (acc, item) => acc + 1 })
+    }
+    
+    categoryCounts.map { case (category, count) =>
+      (category, count.toDouble / totalPosts)
+    }
+  }
+}
+
+def isAuthorInCategoryByPostAnalysis(
+  authorId: Long,
+  localCategory: String,
+  experimentOption: Int
+): Boolean = {
+  val threshold: Double = experimentOption match {
+    case 3 => thresholdOption3
+    case 4 => thresholdOption4
+    case 5 => thresholdOption5
+    case _ => 1.0
+  }
+  
+  val categoryPercentages = calculateAuthorCategoryPercentages(authorId)
+  
+  categoryPercentages.get(localCategory) match {
+    case Some(percentage) => percentage >= threshold
+    case None => false
+  }
+}
+
+def getAuthorCategoriesByPostAnalysis(authorId: Long, experimentOption: Int): Set[String] = {
+  val threshold: Double = experimentOption match {
+    case 3 => thresholdOption3
+    case 4 => thresholdOption4
+    case 5 => thresholdOption5
+    case _ => 1.0
+  }
+  
+  val categoryPercentages = calculateAuthorCategoryPercentages(authorId)
+  
+  categoryPercentages.filter { case (_, percentage) =>
+    percentage >= threshold
+  }.keys.toSet
+}
+
+def filterTopicEntityIdsByPostAnalysis(
+  topicEntityIds: Seq[Long],
+  authorId: Long,
+  experimentOption: Int
+): Seq[Long] = {
+  val authorTopicIds: Set[Long] = getAuthorCategoriesByPostAnalysis(authorId, experimentOption)
+    .map { local => authorCategoryConstants.getXAICategoryIdsForLocalCategory(local).headOption }
+    .flatten
+  topicEntityIds.filter { topicEntityId =>
+    authorTopicIds.contains(authorCategoryConstants.getSupertopicForTopicEntityId(topicEntityId))
+  }
+}
+
+def getFilteredTopicEntityIds(
+  unifiedPostAnnotationsOpt: Option[UnifiedPostAnnotations],
+  authorId: Long,
+  experimentOption: Int
+): Seq[Long] = {
+  val allTopicEntityIds = getUnifiedPostTopicEntityIds(unifiedPostAnnotationsOpt)
+  
+  if (experimentOption == 0) {
+    allTopicEntityIds
+  } else if (experimentOption >= 1 && experimentOption <= 2) {
+    filterTopicEntityIdsForAuthor(allTopicEntityIds, authorId, experimentOption)
+  } else if (experimentOption >= 3 && experimentOption <= 5) {
+    val postBasedTopics = filterTopicEntityIdsByPostAnalysis(allTopicEntityIds, authorId, experimentOption)
+    postBasedTopics.distinct
+  } else {
+    Seq.empty
+  }
+}
+
+
+
+def getCategoriesForTopicEntityIds(topicEntityIds: Seq[Long]): Set[String] = {
+  topicEntityIds.map { topicEntityId =>
+    getLocalCategoriesForTopicEntityId(topicEntityId)
+  }.flatten.toSet
+}
+
+def countTopicsByCategory(topicEntityIds: Seq[Long]): Map[String, Int] = {
+  val allCategories: Seq[String] = topicEntityIds.map { topicEntityId =>
+    getLocalCategoriesForTopicEntityId(topicEntityId)
+  }.flatten
+  allCategories.groupBy { x => x }.map { case (cat, occurrences) =>
+    (cat, occurrences.foldLeft(0) { (acc, item) => acc + 1 })
+  }
+}
+
+Library({
+  export = {
+    checkCachedTweetNewFavEventShouldTrigger = checkCachedTweetNewFavEventShouldTrigger,
+    checkUncachedTweetNewFavEventShouldTrigger = checkUncachedTweetNewFavEventShouldTrigger,
+    checkCachedTweetRepeatFavEventShouldTrigger = checkCachedTweetRepeatFavEventShouldTrigger,
+    checkUncachedTweetRepeatFavEventShouldTrigger = checkUncachedTweetRepeatFavEventShouldTrigger,
+    checkCachedTweetRepeatFavEventShouldRepeat = checkCachedTweetRepeatFavEventShouldRepeat,
+    checkPassMinFavCount = checkPassMinFavCount,
+    repeatGenEvent = repeatGenEvent,
+    getTweetypieResponse = getTweetypieResponse,
+    getUnifiedPostContentCategories = getUnifiedPostContentCategories,
+    getUnifiedPostTopicEntityIds = getUnifiedPostTopicEntityIds,
+    getEngagementCount = getEngagementCount,
+    createAuthorMetadata = createAuthorMetadata,
+    createPKeyForCategoryColdStartManhattan = createPKeyForCategoryColdStartManhattan,
+    eitherPostOrQuoteHasVideo = eitherPostOrQuoteHasVideo,
+    getPostMetadataLightweight = getPostMetadataLightweight,
+    getUnifiedPostAnnotations = getUnifiedPostAnnotations,
+    videoDurationMs = videoDurationMs,
+    getAuthorId = getAuthorId,
+    isReply = isReply,
+    isSelfReply = isSelfReply,
+    inReplyToPostId = inReplyToPostId,
+    hasMinFavoriteCount = hasMinFavoriteCount,
+    isCommunityPost = isCommunityPost,
+    isAdultPost = isAdultPost,
+    isNsfwPost = isNsfwPost,
+    isAuthorVisible = isAuthorVisible,
+    isRepost = isRepost,
+    hasImmersiveVideo = hasImmersiveVideo,
+    hasValidImmersiveVideo = hasValidImmersiveVideo,
+    isImaginePost = isImaginePost,
+    shouldDropPostByVF = shouldDropPostByVF,
+    getAuthorFollowers = getAuthorFollowers,
+    isAuthorInCategoryForExperiment = isAuthorInCategoryForExperiment,
+    getLocalCategoriesForTopicEntityId = getLocalCategoriesForTopicEntityId,
+    getSupertopicForTopicEntityId = authorCategoryConstants.getSupertopicForTopicEntityId,
+    filterTopicEntityIdsForAuthor = filterTopicEntityIdsForAuthor,
+    getAuthorRecentOriginalAndQuotePosts = getAuthorRecentOriginalAndQuotePosts,
+    getPostCategories = getPostCategories,
+    calculateAuthorCategoryPercentages = calculateAuthorCategoryPercentages,
+    isAuthorInCategoryByPostAnalysis = isAuthorInCategoryByPostAnalysis,
+    getAuthorCategoriesByPostAnalysis = getAuthorCategoriesByPostAnalysis,
+    filterTopicEntityIdsByPostAnalysis = filterTopicEntityIdsByPostAnalysis,
+    getFilteredTopicEntityIds = getFilteredTopicEntityIds,
+    getCategoriesForTopicEntityIds = getCategoriesForTopicEntityIds,
+    countTopicsByCategory = countTopicsByCategory
+  },
+  description = PlainText("Shared config and helper methods for event processing"),
+  contactInfo = sharedConfig.contactInfo,
+  lifecycle = Production,
+})

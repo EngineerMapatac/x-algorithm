@@ -1,0 +1,54 @@
+description:\nexpression: |
+  params(Long :tweetId, String :label, Long :userId, String :reason) {
+    val :nsfwUserHllNamespace = "NsfwUser";
+    val :hllTopic = {
+      if (:label == "NSFW_NEAR_PERFECT") {
+        "NSFWNearPerfectImagePosted"
+      } else if (:label == "NSFW_HIGH_PRECISION") {
+        "NSFWHighPrecisionImagePosted"
+      } else if (:label == "NSFW_HIGH_RECALL") {
+        "NSFWHighRecallImagePosted"
+      } else {
+        unsupportedUserLabel
+      }
+    };
+    val :hllPrecision = 60;
+    # one day + 2 hours (should match lookback sec in GetHLLCountFromDataCenters)
+    val :hllTtl = 26;
+    val :hllSlice = 1;
+    if ({
+      AddToHLLForDataCenter(
+        :nsfwUserHllNamespace,
+        :hllTopic,
+        ToString(:userId),
+        ToString(:tweetId),
+        :hllPrecision,
+        :hllTtl,
+        :hllSlice,
+        0
+      ) &&
+      GetHLLCountFromDataCenters(
+        :nsfwUserHllNamespace,
+        :hllTopic,
+        ToString(:userId),
+        OneDayInSecs,
+        :hllPrecision,
+        0,
+        :hllSlice
+      ) > 2
+    }) {
+      IncrementStat(Concat(:hllTopic, "MoreThan2InADay"), 1);
+      val :fatigueNamespace = Concat("Fatigue", ToString(RULE_ID), :label);
+
+      if (!HasLabel(:fatigueNamespace, ToString(:userId))) {
+        SetLabelWithTtl(:fatigueNamespace, ToString(:userId), "TRUE", DayInSecs);
+        ApplyNsfwUserLabelOrCreateReport(:userId, :label, :reason);
+      } else {
+        FALSE
+      }
+    } else {
+      FALSE
+    }
+  }
+logged: 'true'
+returnType: BooleanValue

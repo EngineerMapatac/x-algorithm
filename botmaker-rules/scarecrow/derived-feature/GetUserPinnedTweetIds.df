@@ -1,0 +1,12 @@
+description:\nexpression: |
+  params(Long :userId)
+  {
+    val :user = GetUser(:userId);
+    if (:user != NULL && :user.profile_design != NULL && :user.profile_design.pinned_tweet_ids != NULL) {
+      :user.profile_design.pinned_tweet_ids;
+    } else {
+      EmptyLongList
+    }
+  }
+logged: 'false'
+returnType: LongListValue

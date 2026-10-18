@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 X.AI Corp.
+[package]
+name = "xai-recsys-mm-server"
+version = "0.1.0"
+edition.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+arrow = { workspace = true }
+chrono = { workspace = true }
+bytes = { workspace = true }
+lazy_static = { workspace = true }
+rayon = { workspace = true }
+log = { workspace = true }
+parquet = { workspace = true, features = ["arrow"] }
+prometheus = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+object_store = { workspace = true, features = ["aws"] }
+futures = { workspace = true }
+half = { workspace = true }
+heed = { workspace = true }
+memmap2 = { workspace = true }
+numpy = { workspace = true }
+pyo3 = { workspace = true }
+thrift = { workspace = true }
+xai-recsys-server = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

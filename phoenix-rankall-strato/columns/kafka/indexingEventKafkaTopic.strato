@@ -1,0 +1,20 @@
+import <hydra/sharedConfig>
+
+val accessPolicy = AnyOf(Seq(
+  FromColumns(Set(Path("hydra/phoenix_rank_all/phoenixRankAllCandidateProcessor"))),
+  sharedConfig.adminPolicy
+))
+
+Managed({
+  source = KafkaColumn({
+    topic = "phoenix_rank_all_indexing_event",
+    dest = "/s/kafka/main-2:kafka-tls",
+    mapping = ValueOnly({
+      value = Type(com.twitter.strato.columns.hydra.PhoenixRankAllObject),
+      encoding = ThriftEncoding
+    })
+  }),
+  contactInfo = Some(sharedConfig.contactInfo),
+  accessPolicy = accessPolicy,
+  lifecycle = Development
+})

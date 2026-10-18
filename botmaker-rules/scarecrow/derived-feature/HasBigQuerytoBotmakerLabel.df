@@ -1,0 +1,5 @@
+description:\nexpression: |
+  params(String :jobName, String :entityId)
+  HasLabel(Concat(BQ_to_BM_namespace, :jobName), :entityId)
+logged: 'false'
+returnType: Auto

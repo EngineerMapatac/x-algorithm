@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 X.AI Corp.
+[project]
+name = "xai-checkpointing"
+version = "0.0.1"
+description = "xAI checkpointing"
+dependencies = [
+  "tensorstore>=0.1.73",
+  "xai-gimmick",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.9,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""

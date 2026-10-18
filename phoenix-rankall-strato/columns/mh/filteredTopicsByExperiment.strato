@@ -1,0 +1,34 @@
+import <hydra/sharedConfig>
+
+type FilteredTopicsByExperiment = com.twitter.strato.columns.hydra.FilteredTopicsByExperiment
+
+val cache = {
+  dest = "/srv#/prod/local/cache/content_understanding_grok_:twemcaches",
+  keyPrefix = "filtered_topics_",
+  foundTtl = 1.hour,
+  missingTtl = 5.minutes,
+}
+
+Managed({
+  cache = Some(cache),
+  autoWipeout = Disabled,
+  source = ManhattanColumn({
+    dest = "/s/manhattan/baltar.native-thrift",
+    appId = "video_understanding",
+    dataset = "filtered_topics_by_experiment",
+    mapping = Simple({
+      key = Type(Long),
+      value = Type(FilteredTopicsByExperiment),
+      keyEncoding = ManhattanClientBijectionsEncoding,
+      valueEncoding = ThriftEncoding,
+    }),
+    ttl = 2.days,
+  }),
+  accessPolicy = ReadWritePolicy({
+    readPolicy = AllowAll,
+    writePolicy = FromColumns(Set(Path("hydra/phoenix_rank_all/phoenixRankAllCandidateProcessor")))
+  }),
+  lifecycle = Production,
+  contactInfo = Some(sharedConfig.contactInfo),
+  description = PlainText("Manhattan storage for filtered topic entity IDs by experiment option per post")
+})

@@ -1,0 +1,14 @@
+description:\nexpression: |
+  params(String :key, Long :ttl, Boolean :updateTwemcache = FALSE){
+    val :namespace = CreateRemediationFatigueNamespace;
+
+    SetLabelWithTtl(
+      :namespace,
+      :key,
+      "TRUE",
+      :ttl,
+      :updateTwemcache
+    );
+  }
+logged: 'false'
+returnType: Auto

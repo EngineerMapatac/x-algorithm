@@ -1,0 +1,6 @@
+description:\nexpression: |
+  params(Object :a, Object :defaultValue) {
+    If(:a != NULL, :a, :defaultValue)
+  }
+logged: 'false'
+returnType: Auto

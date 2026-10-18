@@ -1,0 +1,5 @@
+description:\nexpression: |
+  param(String :namespace, String :key)
+  GetLabel(:namespace, :key) != ""
+logged: 'false'
+returnType: BooleanValue

@@ -1,0 +1,4 @@
+description:\nexpression: |
+  ToList(SetIntersection(Set(1), Set(2)))
+logged: 'false'
+returnType: LongListValue

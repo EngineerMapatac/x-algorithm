@@ -1,0 +1,51 @@
+id: '3226'
+description:\nevent: url_event
+condition: |
+  Exists(tweetId) &&
+  Exists(redirectionChain) &&
+  Count(redirectionChain) > 0 &&
+  GetUrlVerdictForSingleChain(redirectionChain) MATCHES ".*BAD" &&
+  with (
+    :authorId =
+      if (
+        Exists(originalTweetId) &&
+        originalTweetId != 0 &&
+        originalTweetId != tweetId
+      ) {
+        ToLong(GetMapValue(GetTweetInfo(originalTweetId), "user_id"))
+      } else {
+        tcoUserId
+      }
+  ) {
+    !IsTestUser(:authorId) &&
+    !IsHighPageRankUser(:authorId) &&
+    !Contains(GetLongList(`AutoExpiringTempSkipList`), :authorId) &&
+    !IsUserGrayVerified(:authorId)
+  }
+action: |
+  with (
+    :activeTweetId =
+      if (Exists(originalTweetId) && originalTweetId != 0) {
+        originalTweetId
+      } else {
+        tweetId
+      },
+    :label = "lowquality",
+    :verdict = GetUrlVerdictForSingleChain(redirectionChain)
+  ) {
+    DoAsync(
+      Log(Join("_", "url", "async", "tweet", :label, "3226"), "1"),
+      IncrementStat(Join("_", "url_async_tweet", :label, "3226"), 1),
+      AddGuanoNote(spammerId, TwitterSafetyUserId, Join(" ", "go/bot/3226 labeled as spam Tweet Id ", ToString(tweetId))),
+      if (:verdict MATCHES "BAD") {
+        TweetRtfApplyLabel("SPAM", :activeTweetId);
+        IncrementStat("url_event_catches/tweet/3226", 1);
+      } else {
+        TweetRtfApplyLabel("SPAM_HIGH_RECALL", :activeTweetId);
+        IncrementStat("url_event_catches/tweet/3226", 1);
+      }
+    );
+  }
+expiry: '2035-03-26T19:42:00Z'
+isActive: 'true'
+owner:\nactionLimits: {}

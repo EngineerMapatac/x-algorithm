@@ -1,0 +1,14 @@
+{
+  "tunables": [
+    {
+      "id" : "com.twitter.cortex_media_annotator.deepbirdMaxExtraLoad",
+      "value" : 0.0,
+      "type" : "double"
+    },
+    {
+      "id" : "com.twitter.cortex_media_annotator.blobStoreMaxExtraLoad",
+      "value" : 0.0,
+      "type" : "double"
+    }
+  ]
+}

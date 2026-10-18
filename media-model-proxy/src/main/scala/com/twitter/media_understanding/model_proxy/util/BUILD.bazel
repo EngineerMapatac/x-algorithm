@@ -1,0 +1,14 @@
+scala_library(
+    compiler_option_sets = ["fatal_warnings"],
+    dependencies = [
+        "decider",
+        "finagle/finagle-core",
+        "media-understanding/common/src/main/scala/com/twitter/media_understanding/common/helpers:context",
+        "media-understanding/media-model-proxy/src/main/scala/com/twitter/media_understanding/model_proxy/config",
+        "media-understanding/media-model-proxy/src/main/thrift:thrift-scala",
+        "mediaservices/commons",
+        "servo/service",
+    ],
+    strict_deps = False,
+    tags = ["bazel-compatible"],
+)

@@ -1,0 +1,93 @@
+description:\nexpression: |
+  params(Long :userId, String :label, String :reason, Long :labelExpiry = CurrentTimeMs() + SevenDaysInSecs * 1000) {
+    val :manualRemovalTimestamp = GetLabel("NsfwUserLabelRemoved", ToString(:userId));
+
+    val :labelApplied =
+      if (
+        { # Proactively report instead of proactively label if a NSFW label has been removed in the past 90 days
+          :manualRemovalTimestamp != "" && ToLong(:manualRemovalTimestamp) > CurrentTimeMs() - (3 * ThirtyDaysInSecs * 1000)
+        } ||
+        { # Proactively report likely false positives
+          TryOrElse(
+            IsHighPageRankUser(:userId) &&
+            MapGet(GetUserHealthSignals(:userId, List("NsfwConsumerFollowerScoreDouble")), "NsfwConsumerFollowerScoreDouble").doubleValue < 0.1,
+            FALSE
+          )
+        } ||
+        IsUserGrayVerified(:userId) ||
+        Contains(GetLongList(`AutoExpiringTempSkipList`), :userId) ||
+        IsUserGoldVerified(:userId)
+      ) {
+        val :reportedNamespace = "ApplyNsfwUserLabelReported";
+        if (GetLabel(:reportedNamespace, ToString(:userId)) == "") {
+          # Limit reports to 1x per week
+          Log(:reportedNamespace, :label);
+          SetLabelWithTtl(:reportedNamespace, ToString(:userId), "APPLIED", OneWeekInSecs, TRUE);
+          IncrementStat(:reportedNamespace, 1);
+          import com.twitter.useng.rtp.core.thriftjava.Entity;
+          import com.twitter.useng.rtp.core.thriftjava.Profile;
+          val :entity = Entity(
+            "profile": Profile("userId": :userId)
+          );
+          if (
+            IsHighPageRankUser(:userId) ||
+            Contains(GetLongList(`AutoExpiringTempSkipList`), :userId) ||
+            IsUserGrayVerified(:userId) ||
+            IsUserGoldVerified(:userId)
+          ) {
+            CreateRtpReportAsyncProd(:entity, :userId, "MEDIA_PROACTIVE_REVIEW", 2241808, :reason);
+            val :guanoNote = Concat(
+              "go/bot/", RULE_ID,
+              ": Sent to ATT (", 2241808, ") for review for label ", :label
+            );
+            Try(AddTwitterSupportGuanoNote(:userId, :guanoNote));
+
+            TRUE
+          } else {
+            FALSE
+          }
+        } else {
+          FALSE
+        }
+      } else if (
+        !IsHighPageRankUser(:userId) &&
+        !Contains(GetLongList(`AutoExpiringTempSkipList`), :userId) &&
+        !IsUserGrayVerified(:userId)
+      ) {
+        Log("NsfwUserLabelApplied", :label);
+        val :guanoNote = Concat(
+          "go/bot/", RULE_ID,
+          ": Added label ",
+          :label
+        );
+        Try(AddTwitterSupportGuanoNote(:userId, :guanoNote));
+        SetUserLabel(:userId, :label, :reason, :labelExpiry)
+      } else if (!TryOrElse(GetUser(:userId).safety.nsfw_admin, FALSE)) {
+        Log("NsfwUserLabelHighApplied", :label);
+        val :guanoNote = Concat(
+          "go/bot/", RULE_ID,
+          ": Added label ", :label, " for 3 days"
+        );
+        Try(AddTwitterSupportGuanoNote(:userId, :guanoNote));
+        SetUserLabel(:userId, :label, :reason, CurrentTimeMs() + OneDayInSecs * 3 * 1000)
+      } else {
+        # Do Not Label if NSFW Admin is Already Present
+        Log("NsfwUserLabelHighHasNsfwAdmin", :label);
+        val :guanoNote = Concat(
+          "go/bot/", RULE_ID,
+          ": Skipped adding label ", :label, " since user is nsfw_admin"
+        );
+        Try(AddTwitterSupportGuanoNote(:userId, :guanoNote));
+        FALSE
+      };
+
+    Log(Join("/", "ApplyNsfwUserLabelOrCreateReport", "user_id"), ToString(:userId));
+    Log(Join("/", "ApplyNsfwUserLabelOrCreateReport", "followers"), TryOrElse(FollowerCount(:userId), 0));
+    Log(Join("/", "ApplyNsfwUserLabelOrCreateReport", "verified_followers"), TryOrElse(ToLong(MapGet(GetVerifiedFollowers(:userId), "verifiedFollowers")), 0));
+    val :nsfwConsumerFollowerScore = TryOrElse(MapGet(GetUserHealthSignals(:userId, List("NsfwConsumerFollowerScoreDouble")), "NsfwConsumerFollowerScoreDouble").doubleValue, 0);
+    Log(Join("/", "ApplyNsfwUserLabelOrCreateReport", "nsfw_consumer_follower_score"), :nsfwConsumerFollowerScore);
+
+    :labelApplied
+  }
+logged: 'true'
+returnType: BooleanValue

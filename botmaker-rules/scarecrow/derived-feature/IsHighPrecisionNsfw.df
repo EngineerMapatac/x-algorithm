@@ -1,0 +1,10 @@
+description:\nexpression: |
+  {
+    val :new = IsHighPrecisionNsfwNewModelLogic;
+    if (:new) {
+      IncrementStat(Join("/", "New_Model", "High_Precision", "Migration"), 1);
+    }
+    :new
+  }
+logged: 'false'
+returnType: BooleanValue

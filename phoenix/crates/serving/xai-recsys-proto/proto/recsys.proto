@@ -1,0 +1,2072 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 X.AI Corp.
+syntax = "proto3";
+
+package xai.recsys.v1;
+
+option java_package = "com.x.user_action_sequence";
+option java_outer_classname = "proto_java";
+option java_multiple_files = true;
+
+service RecsysPredictor {
+  rpc PredictNextActions(PredictNextActionsRequest)
+      returns (PredictNextActionsResponse) {}
+
+  rpc ReloadModel(ReloadModelRequest) returns (ReloadModelResponse) {}
+}
+
+service RecsysRetrievalPredictor {
+  rpc RetrieveTopKCandidates(RetrieveTopKCandidatesRequest)
+      returns (RetrieveTopKCandidatesResponse) {}
+
+  rpc ScorePosts(ScorePostsRequest) returns (ScorePostsResponse) {}
+
+  rpc ReloadModel(ReloadModelRequest) returns (ReloadModelResponse) {}
+}
+
+enum FeedRequestContext {
+  FEED_REQUEST_CONTEXT_UNKNOWN = 0;
+  FEED_REQUEST_CONTEXT_OTHER = 1;
+  FEED_REQUEST_CONTEXT_LAUNCH = 2;
+  FEED_REQUEST_CONTEXT_FOREGROUND = 3;
+  FEED_REQUEST_CONTEXT_FOREGROUND_TRUNCATE = 4;
+  FEED_REQUEST_CONTEXT_PULL_TO_REFRESH = 5;
+  FEED_REQUEST_CONTEXT_MANUAL_REFRESH = 6;
+  FEED_REQUEST_CONTEXT_NAVIGATE = 7;
+  FEED_REQUEST_CONTEXT_VIEWPORT_AWARE_REFRESH = 8;
+  FEED_REQUEST_CONTEXT_POLLING = 9;
+  FEED_REQUEST_CONTEXT_BACKGROUND_FETCH = 10;
+  FEED_REQUEST_CONTEXT_GAP = 11;
+  FEED_REQUEST_CONTEXT_SIGNUP = 12;
+  FEED_REQUEST_CONTEXT_TWEET_SELF_THREAD = 13;
+  FEED_REQUEST_CONTEXT_AUTO = 14;
+}
+
+enum FeedCursorDirection {
+  FEED_CURSOR_DIRECTION_UNKNOWN = 0;
+  FEED_CURSOR_DIRECTION_INITIAL = 1;
+  FEED_CURSOR_DIRECTION_TOP = 2;
+  FEED_CURSOR_DIRECTION_BOTTOM = 3;
+  FEED_CURSOR_DIRECTION_GAP = 4;
+}
+
+message ClientContext {
+  int64 user_id = 1;
+  int64 guest_id = 2;
+  int64 app_id = 3;
+  string ip_address = 4;
+  string user_agent = 5;
+  string country_code = 6;
+  string language_code = 7;
+  bool is_twoffice = 9;
+  repeated string user_roles = 10;
+  string device_id = 11;
+  string mobile_device_id = 12;
+  string mobile_device_ad_id = 13;
+  bool limit_ad_tracking = 14;
+  int64 guest_id_ads = 15;
+  int64 guest_id_marketing = 16;
+  int64 authenticated_user_id = 17;
+  bool is_verified_crawler = 18;
+  int64 guest_token = 19;
+  string client_version = 20;
+  string time_zone = 21;
+  string device_network_type = 23;
+}
+
+message UserContext {
+  int32 user_age_bracket = 1;
+  int32 user_gender = 2;
+  int32 user_state = 3;
+  repeated bool followed_grok_topics = 4;
+  repeated bool followed_starter_packs = 5;
+  float user_longitude = 6;
+  float user_latitude = 7;
+  int32 user_dma_code = 8;
+  repeated bool inferred_grok_topics = 9;
+  int32 user_age_in_years = 10;
+  int32 user_inferred_gender = 11;
+  float user_inferred_gender_score = 12;
+  repeated bool user_installed_apps = 13;
+  int32 user_followers_count = 14;
+  int32 user_following_count = 15;
+  int32 user_blockers_count = 16;
+  int32 user_muters_count = 17;
+  bool is_nsfw_user = 18;
+  bool is_nsfw_mode = 19;
+  bytes id_list_features_ipc = 20;
+}
+
+message EngagementCountRow {
+  int32 action = 1;
+  repeated uint32 counts = 2;
+}
+
+message EngagementCounts {
+  bool present = 1;
+  repeated uint32 window_secs = 2;
+  repeated EngagementCountRow rows = 3;
+  int64 updated_at_ms = 4;
+  int64 window_end_ms = 5;
+  repeated int32 collected_actions = 6;
+}
+
+message ConversionHistoryContext {
+  float hist_user_total_convs = 1;
+  float hist_user_unique_advs = 2;
+  float hist_user_recency_days = 3;
+  float hist_user_det_ratio = 4;
+  float hist_user_has_conv = 5;
+
+  repeated int32 hist_adv_hashes = 6;
+
+  repeated float per_candidate_features = 7;
+
+  repeated int32 per_candidate_account_hashes = 8;
+}
+
+message RecentSearchQueries {
+  repeated RecentSearchQuery queries = 1;
+}
+
+message RecentSearchQuery {
+  string query = 1;
+  int64 timestamp_ms = 2;
+  bytes embedding_bf16 = 3;
+}
+
+message PredictNextActionsRequest {
+  repeated UserActionSequence sequences = 1;
+
+  repeated CandidateSet candidateSets = 2;
+
+  bool returnLogprob = 3;
+
+  uint32 topLogprobsNum = 4;
+
+  string metadata = 5;
+
+  optional uint64 load_ticket_id = 6;
+
+  repeated AdsCandidateSet adsCandidateSets = 7;
+
+  string intermediateTensorsPath = 8;
+
+  bool returnLogMap = 9;
+
+  repeated uint32 requestedActionIndices = 10;
+
+  bool returnCandidateTweetIdOnly = 11;
+
+  ClientContext clientContext = 12;
+
+  repeated bytes columnar_sequences = 13;
+
+  UserContext userContext = 14;
+
+  ConversionHistoryContext conversionHistory = 15;
+
+  optional uint64 seedTweetId = 16;
+
+  repeated uint32 requestedContinuousActionIndices = 17;
+
+  repeated ConvAssetIds conv_asset_ids = 18;
+
+  PageDecodeParams pageDecode = 19;
+
+  bool returnBackboneScores = 20;
+
+  map<string, string> experiment_overrides = 21;
+
+  bool returnLogitsList = 22;
+
+  repeated PurchaseValueBaseline purchase_value_baselines = 23;
+  EngagementCounts user_ads_engagement_counts = 24;
+
+  FeedRequestContext feed_request_context = 25;
+  FeedCursorDirection feed_cursor_direction = 26;
+}
+
+message PurchaseValueBaseline {
+  int64 impression_id = 1;
+  int64 advertiser_account_id = 2;
+  double mean_value_usd_28d = 3;
+  double mean_value_usd_28d_vt = 4;
+  double mean_content_view_usd_28d = 5;
+  double mean_add_to_cart_usd_28d = 6;
+  double mean_content_view_usd_28d_vt = 7;
+  double mean_add_to_cart_usd_28d_vt = 8;
+}
+
+message PageDecodeParams {
+  uint32 poolN = 1;
+
+  uint32 steps = 2;
+
+  float temperature = 3;
+
+  RankingScoreWeights rankingScoreWeights = 4;
+}
+
+message RankingScoreWeights {
+  float favoriteWeight = 1;
+  float replyWeight = 2;
+  float retweetWeight = 3;
+  float clickWeight = 4;
+  float profileClickWeight = 5;
+  float vqvWeight = 6;
+  float shareWeight = 7;
+  float quoteWeight = 8;
+  float contDwellTimeWeight = 9;
+  float notInterestedWeight = 10;
+  float reportWeight = 11;
+  float notDwelledWeight = 12;
+  float minVideoDurationMs = 13;
+}
+
+message PageDecodeResult {
+  repeated uint32 pickedIndices = 1;
+
+  repeated float pickedProbs = 2;
+
+  repeated float pickedScores = 3;
+}
+
+message ConvAssetIds {
+  repeated int64 impressed_time_ms = 1;
+  repeated int64 author_id = 2;
+  repeated int64 asset_id = 3;
+}
+
+message PredictNextActionsResponse {
+  repeated CandidateDistributionSet distributionSets = 1;
+
+  ClientContext clientContext = 2;
+
+  optional string servingPodName = 3;
+  optional string servingNodeName = 4;
+
+  optional uint64 checkpointLoadDelaySeconds = 5;
+}
+
+message ReloadModelRequest {
+  bool do_reload = 1;
+  repeated string copy_urls = 2;
+  string target_prefix = 3;
+}
+
+message ReloadModelResponse {
+  bool reload_in_progress = 1;
+  double current_checkpoint_timestamp = 2;
+  string serving_prefix = 3;
+  bool peer_ready = 4;
+}
+
+message RetrieveTopKCandidatesRequest {
+  repeated uint64 user_ids = 1;
+
+  repeated UserActionSequence sequences = 2;
+
+  uint32 topK = 3;
+
+  string metadata = 4;
+
+  optional uint64 load_ticket_id = 5;
+
+  repeated uint64 topic_entity_ids = 6;
+
+  optional int32 topic_filter_mode = 7;
+
+  repeated bytes columnar_sequences = 8;
+
+  ClientContext client_context = 9;
+
+  bytes eligible_posts_bloom_filter = 10;
+
+  repeated float search_query_embedding = 11;
+
+  UserContext user_context = 12;
+
+  uint32 num_cold_start_to_retrieve = 13;
+
+  repeated uint64 seed_post_ids = 14;
+
+  repeated ExcludedPostsBloomFilter excluded_posts_bloom_filters = 15;
+
+  repeated uint64 excluded_post_ids = 16;
+}
+
+message ExcludedPostsBloomFilter {
+  repeated fixed64 bit_array = 1;
+  int32 size_cap = 2;
+  double false_positive_rate = 3;
+}
+
+message RetrieveTopKCandidatesResponse {
+  repeated ScoredCandidates topKCandidates = 1;
+}
+
+message ScorePostsRequest {
+  uint64 user_id = 1;
+  bytes columnar_sequence = 2;
+  ClientContext client_context = 3;
+  UserContext user_context = 4;
+  repeated uint64 post_ids = 5;
+
+  repeated uint32 requested_actions = 6;
+  repeated uint32 post_action_masks = 7;
+}
+
+message ScorePostsResponse {
+  PostActionScores scores = 1;
+}
+
+message PostActionScores {
+  repeated uint32 action_indices = 1;
+
+  uint32 num_posts = 2;
+
+  bytes probabilities_bf16 = 3;
+
+  bytes found = 4;
+
+  repeated uint32 post_action_masks = 5;
+}
+
+message DeviceFeature {
+  CountryCode engagingIpCountryCode = 1;
+  DeviceNetworkType deviceNetworkType = 2;
+  Timezone timezone = 3;
+  string ipAddress = 4;
+}
+
+message CandidateSet {
+  uint64 userId = 1;
+
+  repeated TweetInfo candidates = 2;
+
+  ProductSurface productSurface = 3;
+
+  repeated float searchQueryEmbedding = 4;
+
+  DeviceFeature deviceFeature = 5;
+}
+
+message CandidateDistributionSet {
+  uint64 userId = 1;
+
+  repeated NextActionDistribution candidateDistributions = 2;
+  string checkpointPath = 3;
+
+  string intermediateTensorsPath = 4;
+
+  PageDecodeResult pageDecodeResult = 5;
+}
+
+message ScoredCandidates {
+  uint64 userId = 1;
+
+  repeated ScoredCandidate candidates = 2;
+}
+
+enum RetrievalDatasetType {
+  RETRIEVAL_DATASET_TYPE_PAD = 0;
+  RETRIEVAL_DATASET_TYPE_HOME = 1;
+  RETRIEVAL_DATASET_TYPE_IMMERSIVE_2_DAY = 2;
+  RETRIEVAL_DATASET_TYPE_RELEVANT_ADS = 3;
+  RETRIEVAL_DATASET_TYPE_CAROUSEL_ADS = 4;
+  RETRIEVAL_DATASET_TYPE_EVERGREEN = 5;
+  RETRIEVAL_DATASET_TYPE_IMMERSIVE_NSFW = 6;
+  RETRIEVAL_DATASET_TYPE_ACTIVE_ADS = 7;
+  RETRIEVAL_DATASET_TYPE_IMMERSIVE_4_DAY = 8;
+  RETRIEVAL_DATASET_TYPE_IMAGINE = 9;
+  RETRIEVAL_DATASET_TYPE_TAIL = 10;
+  RETRIEVAL_DATASET_TYPE_DPA_PRODUCTS = 11;
+  RETRIEVAL_DATASET_TYPE_TRENDING = 12;
+  RETRIEVAL_DATASET_TYPE_HOME_COLD = 13;
+  RETRIEVAL_DATASET_TYPE_HOME_HOT = 14;
+  RETRIEVAL_DATASET_TYPE_ZERO_FAV = 16;
+}
+
+message ScoredCandidate {
+  TweetInfo candidate = 1;
+
+  float score = 2;
+
+  int32 sourceIdx = 3;
+
+  uint32 datasetType = 4;
+}
+
+message NextActionDistribution {
+  TweetInfo candidate = 1;
+
+  repeated float logits = 2;
+
+  repeated float topLogProbs = 3;
+
+  AdInfo adInfo = 4;
+
+  map<uint32, float> indexToLogits = 5;
+
+  repeated float continuousActionsValues = 6;
+
+  map<uint32, float> indexToContinuousValues = 7;
+
+  RewardOutputs rewardOutputs = 8;
+
+  SlateContext slateContext = 9;
+
+  repeated float backboneTopLogProbs = 10;
+  repeated float backboneContinuousValues = 11;
+
+  repeated float requestedActionLogits = 12;
+}
+
+message RewardOutputs {
+  repeated float values = 1;
+
+  repeated float policyLogits = 2;
+}
+
+enum ActionName {
+  INVALID_NAME = 0;
+  SERVER_TWEET_FAV = 1;
+  SERVER_TWEET_UNFAV = 2;
+  SERVER_TWEET_CREATE = 3;
+  SERVER_TWEET_REPLY = 4;
+  SERVER_TWEET_QUOTE = 5;
+  SERVER_TWEET_RETWEET = 6;
+  SERVER_TWEET_UNREPLY = 7;
+  SERVER_TWEET_UNQUOTE = 8;
+  SERVER_TWEET_UNRETWEET = 9;
+  SERVER_TWEET_REPORT = 10;
+  CLIENT_TWEET_RECAP_DWELLED = 11;
+  CLIENT_TWEET_RECAP_NOT_DWELLED = 12;
+  CLIENT_TWEET_VIDEO_QUALITY_VIEW = 13;
+  CLIENT_TWEET_PHOTO_EXPAND = 14;
+  CLIENT_TWEET_CLICK_MENTION_SCREEN_NAME = 15;
+  CLIENT_TWEET_REPORT = 16;
+  CLIENT_TWEET_NOT_INTERESTED_IN = 17;
+  CLIENT_TWEET_UNDO_NOT_INTERESTED_IN = 18;
+  CLIENT_TWEET_SEE_FEWER = 19;
+  CLIENT_TWEET_UNDO_SEE_FEWER = 20;
+  CLIENT_TWEET_FOLLOW_AUTHOR = 21;
+  CLIENT_TWEET_UNFOLLOW_AUTHOR = 22;
+  CLIENT_TWEET_BLOCK_AUTHOR = 23;
+  CLIENT_TWEET_UNBLOCK_AUTHOR = 24;
+  CLIENT_TWEET_MUTE_AUTHOR = 25;
+  CLIENT_TWEET_UNMUTE_AUTHOR = 26;
+  CLIENT_TWEET_MUTE_CONVERSATION = 27;
+  CLIENT_TWEET_UNMUTE_CONVERSATION = 28;
+  CLIENT_TWEET_CLICK = 29;
+  CLIENT_TWEET_CLICK_PROFILE = 30;
+  CLIENT_TWEET_CLICK_SHARE = 31;
+  CLIENT_TWEET_SHARE_VIA_COPY_LINK = 32;
+  CLIENT_TWEET_CLICK_SEND_VIA_DIRECT_MESSAGE = 33;
+  CLIENT_TWEET_UNBOOKMARK = 34;
+  CLIENT_TWEET_CLICK_HASHTAG = 35;
+  CLIENT_TWEET_BOOKMARK = 36;
+  CLIENT_TWEET_SHARE = 37;
+  CLIENT_QUOTED_TWEET_CLICK = 38;
+  CLIENT_TWEET_OPEN_LINK = 39;
+  CLIENT_TWEET_TAKE_SCREENSHOT = 40;
+  CLIENT_TWEET_TRANSLATE_CLICK = 41;
+  CLIENT_TWEET_NOT_RELEVANT = 42;
+  CLIENT_TWEET_UNDO_NOT_RELEVANT = 43;
+  SERVER_TWEET_REACT_WITH_VIDEO = 44;
+  CLIENT_TWEET_SHOW_MORE_EXPAND = 45;
+  CLIENT_TWEET_CLICK_GROK_ANALYZE = 46;
+  CLIENT_TWEET_VIDEO_OPEN = 47;
+  CLIENT_QUOTED_TWEET_VIDEO_QUALITY_VIEW = 48;
+  CLIENT_QUOTED_TWEET_PHOTO_EXPAND = 49;
+  CLIENT_NOTIFICATION_OPEN = 50;
+  CLIENT_NOTIFICATION_CLICK = 51;
+  CLIENT_NOTIFICATION_SEE_LESS_OFTEN = 52;
+  CLIENT_NOTIFICATION_DISMISS = 53;
+  CLIENT_APP_ENTER = 54;
+  CLIENT_APP_EXIT = 55;
+  CLIENT_NOTIFICATION_IMPRESSION = 56;
+  CLIENT_PROFILE_CLICK = 57;
+  CLIENT_NOTIFICATION_SENT = 58;
+  SERVER_TWEET_POST_UNEXPLORED = 59;
+  CLIENT_TWEET_EXTERNAL_LINK_LONG_DWELLED = 60;
+  SERVER_PROFILE_FOLLOW = 61;
+  SERVER_PROFILE_UNFOLLOW = 62;
+  SERVER_PROFILE_BLOCK = 63;
+  SERVER_PROFILE_UNBLOCK = 64;
+  SERVER_PROFILE_MUTE = 65;
+  SERVER_PROFILE_UNMUTE = 66;
+  SERVER_PROFILE_REPORT = 67;
+  CLIENT_TWEET_CAROUSEL_SWIPE_NEXT = 68;
+  CLIENT_TWEET_CAROUSEL_SWIPE_PREVIOUS = 69;
+  CLIENT_EXTERNAL_LINK_SESSION = 70;
+  CLIENT_TWEET_RENDER_IMPRESSION = 71;
+  CLIENT_TWEET_DETAILS_IMPRESSION = 72;
+  CLIENT_TWEET_IMMERSIVE_IMPRESSION = 73;
+  CLIENT_TWEET_VIDEO_PLAYBACK_START = 74;
+  CLIENT_TWEET_VIDEO_PLAYBACK_COMPLETE = 75;
+  CLIENT_TWEET_VIDEO_PLAYBACK_25 = 76;
+  CLIENT_TWEET_VIDEO_PLAYBACK_50 = 77;
+  CLIENT_TWEET_VIDEO_PLAYBACK_75 = 78;
+  CLIENT_TWEET_VIDEO_PLAYBACK_95 = 79;
+  CLIENT_TWEET_VIDEO_HEARTBEAT = 80;
+  CLIENT_TWEET_VIDEO_MRC_VIEW = 81;
+  CLIENT_TWEET_VIDEO_VIEW = 82;
+  CLIENT_TWEET_VIDEO_VIEW_THRESHOLD = 83;
+  CLIENT_TWEET_VIDEO_6SEC_VIEW = 84;
+  CLIENT_TWEET_VIDEO_WATCH_TIME = 85;
+  CLIENT_EXTERNAL_LINK_SESSION_LESS_THAN_3_SEC = 86;
+  CLIENT_EXTERNAL_LINK_SESSION_LESS_THAN_5_SEC = 87;
+  CLIENT_EXTERNAL_LINK_SESSION_LESS_THAN_10_SEC = 88;
+  CLIENT_EXTERNAL_LINK_SESSION_MORE_THAN_30_SEC = 89;
+  CLIENT_EXTERNAL_LINK_SESSION_MORE_THAN_60_SEC = 90;
+  CLIENT_TWEET_VIDEO_PLAY_FROM_TAP = 91;
+  CLIENT_TWEET_GALLERY_IMPRESSION = 92;
+  CLIENT_EXTERNAL_LINK_SESSION_MORE_THAN_3_SEC = 93;
+  CLIENT_EXTERNAL_LINK_SESSION_MORE_THAN_5_SEC = 94;
+  CLIENT_TWEET_VIDEO_PLAYBACK_START_WITH_50PCT_VIEW = 95;
+  CLIENT_TWEET_VIDEO_PLAYBACK_COMPLETE_WITH_50PCT_VIEW = 96;
+  CLIENT_TWEET_VIDEO_PLAYBACK_25_WITH_50PCT_VIEW = 97;
+  CLIENT_TWEET_VIDEO_PLAYBACK_50_WITH_50PCT_VIEW = 98;
+  CLIENT_TWEET_VIDEO_PLAYBACK_75_WITH_50PCT_VIEW = 99;
+  DPA_IMPRESSION = 100;
+  DPA_CLICK = 101;
+  BRAND_ENGAGEMENT = 102;
+  CLIENT_TWEET_DETAIL_DWELL = 103;
+  CLIENT_TWEET_SEARCH_QUERY_REFORMULATED = 104;
+  CLIENT_TWEET_RELEVANT_TO_SEARCH = 105;
+  CLIENT_TWEET_NOT_RELEVANT_TO_SEARCH = 106;
+  CLIENT_TWEET_LIVE_STREAM_REPLY = 107;
+  LLM_JUDGE_RELEVANT_TO_SEARCH = 108;
+  LLM_JUDGE_NOT_RELEVANT_TO_SEARCH = 109;
+  CLIENT_NOTIFICATION_SETTING_OPT_OUT = 110;
+
+  ADS_WEB_CONVERSION = 128;
+  ADS_VIDEO_VIEW = 129;
+  ADS_CLICK = 130;
+  ADS_DWELL_LONG = 131;
+  ADS_POSITIVE_ENG = 132;
+  ADS_SOCIAL_ENG = 133;
+  ADS_NEGATIVE_ENG = 134;
+  ADS_ATTRIBUTED_KEY_CLICK_CONVERSION = 135;
+  ADS_ATTRIBUTED_CLICK_CONVERSION = 136;
+  ADS_ATTRIBUTED_KEY_VIEW_CONVERSION = 137;
+  ADS_ATTRIBUTED_VIEW_CONVERSION = 138;
+  ADS_ATTRIBUTED_MACT_CLICK_INSTALL = 139;
+  ADS_ATTRIBUTED_MACT_VIEW_INSTALL = 140;
+  ADS_ATTRIBUTED_MACT_CLICK_THRU_LOWER_FUNNEL_EVENT = 141;
+  ADS_ATTRIBUTED_MACT_VIEW_THRU_LOWER_FUNNEL_EVENT = 142;
+  ADS_DOWNLOAD_CONVERSION = 143;
+  ADS_SIGN_UP_CONVERSION = 144;
+  ADS_CUSTOM_CONVERSION = 145;
+  ADS_ADD_TO_WISHLIST_CONVERSION = 146;
+  ADS_CHECKOUT_INITIATED_CONVERSION = 147;
+  ADS_SEARCH_CONVERSION = 148;
+  ADS_CONTENT_VIEW_CONVERSION = 149;
+  ADS_ADDED_PAYMENT_INFO_CONVERSION = 150;
+  ADS_SUBSCRIBE_CONVERSION = 151;
+  ADS_START_TRIAL_CONVERSION = 152;
+  ADS_PRODUCT_CUSTOMIZATION_CONVERSION = 153;
+  ADS_SESSION_CONVERSION = 154;
+  ADS_LANDING_PAGE_VIEW_CONVERSION = 155;
+  ADS_SITE_VISIT_CONVERSION = 156;
+  ADS_COMPLETE_REGISTRATION_CONVERSION = 157;
+  CLIENT_EXTERNAL_LINK_SESSION_MORE_THAN_15_SEC = 158;
+  CLIENT_EXTERNAL_LINK_SESSION_MORE_THAN_20_SEC = 159;
+  CLIENT_EXTERNAL_LINK_SESSION_MORE_THAN_25_SEC = 160;
+  CLIENT_TWEET_RELEVANT_TO_SEARCH_DEPRECATED = 161;
+  CLIENT_TWEET_NOT_RELEVANT_TO_SEARCH_DEPRECATED = 162;
+  CLIENT_TWEET_REPLY_DOWNVOTE = 163;
+  ADS_LONG_DWELL_10_SEC_AND_ATTRIBUTED_CONVERSION = 164;
+  ADS_LONG_DWELL_15_SEC_AND_ATTRIBUTED_CONVERSION = 165;
+  ADS_LONG_SITE_DWELL_CONVERSION = 166;
+  P_OPEN_LINK_P10 = 167;
+  P_OPEN_LINK_P25 = 168;
+  P_OPEN_LINK_P50 = 169;
+  P_OPEN_LINK_P75 = 170;
+  ADS_ATTRIBUTED_MACT_PURCHASE = 171;
+  ADS_ATTRIBUTED_MACT_ADD_TO_CART = 172;
+  ADS_ATTRIBUTED_MACT_LEVEL_ACHIEVED = 173;
+  ADS_ATTRIBUTED_MACT_TUTORIAL_COMPLETE = 174;
+  ADS_ATTRIBUTED_MACT_SIGN_UP = 175;
+  ADS_ATTRIBUTED_MACT_CUSTOM = 176;
+  ADS_ATTRIBUTED_MACT_VIEW_PURCHASE = 177;
+  ADS_ATTRIBUTED_MACT_VIEW_ADD_TO_CART = 178;
+  ADS_ATTRIBUTED_MACT_VIEW_LEVEL_ACHIEVED = 179;
+  ADS_ATTRIBUTED_MACT_VIEW_TUTORIAL_COMPLETE = 180;
+  ADS_ATTRIBUTED_MACT_VIEW_SIGN_UP = 181;
+  ADS_ATTRIBUTED_MACT_VIEW_CUSTOM = 182;
+  ADS_PURCHASE_CONVERSION_VIEW_THROUGH = 183;
+  ADS_ADD_TO_CART_CONVERSION_VIEW_THROUGH = 184;
+  ADS_CHECKOUT_INITIATED_CONVERSION_VIEW_THROUGH = 185;
+  ADS_SIGN_UP_CONVERSION_VIEW_THROUGH = 186;
+  ADS_SITE_VISIT_CONVERSION_VIEW_THROUGH = 187;
+  ADS_SESSION_CONVERSION_VIEW_THROUGH = 188;
+  ADS_LANDING_PAGE_VIEW_CONVERSION_VIEW_THROUGH = 189;
+  ADS_UPPER_FUNNEL_CONVERSION_VIEW_THROUGH = 190;
+  ADS_PIXEL_FIRE = 191;
+  ADS_LONG_DWELL_AND_PIXEL_FIRE = 192;
+  P_LONG_DWELL_AND_PIXEL_FIRE = 193;
+  ADS_ATTRIBUTED_MACT_MMP_CLICK_INSTALL = 194;
+  ADS_ATTRIBUTED_MACT_MMP_VIEW_INSTALL = 195;
+  ADS_PURCHASE_CONVERSION = 200;
+  ADS_MID_FUNNEL_CONVERSION = 201;
+  ADS_ADD_TO_CART_CONVERSION = 202;
+  ADS_UPPER_FUNNEL_CONVERSION = 203;
+  ADS_ATTRIBUTED_KEY_CLICK_CONVERSION_DELAYED = 204;
+  ADS_ATTRIBUTED_CLICK_CONVERSION_DELAYED = 205;
+  ADS_PURCHASE_CONVERSION_DELAYED = 206;
+  ADS_MID_FUNNEL_CONVERSION_DELAYED = 207;
+  ADS_ADD_TO_CART_CONVERSION_DELAYED = 208;
+  ADS_UPPER_FUNNEL_CONVERSION_DELAYED = 209;
+  ADS_WEB_CONVERSION_DELAYED = 210;
+  ADS_SEARCH_CONVERSION_DELAYED = 211;
+  ADS_SIGN_UP_CONVERSION_DELAYED = 212;
+  ADS_CHECKOUT_INITIATED_CONVERSION_DELAYED = 213;
+  ADS_ATTRIBUTED_KEY_CLICK_CONVERSION_DELAYED_TIER_2 = 214;
+  ADS_ATTRIBUTED_CLICK_CONVERSION_DELAYED_TIER_2 = 215;
+  ADS_PURCHASE_CONVERSION_DELAYED_TIER_2 = 216;
+  ADS_MID_FUNNEL_CONVERSION_DELAYED_TIER_2 = 217;
+  ADS_ADD_TO_CART_CONVERSION_DELAYED_TIER_2 = 218;
+  ADS_UPPER_FUNNEL_CONVERSION_DELAYED_TIER_2 = 219;
+  ADS_WEB_CONVERSION_DELAYED_TIER_2 = 220;
+  ADS_SEARCH_CONVERSION_DELAYED_TIER_2 = 221;
+  ADS_SIGN_UP_CONVERSION_DELAYED_TIER_2 = 222;
+  ADS_CHECKOUT_INITIATED_CONVERSION_DELAYED_TIER_2 = 223;
+  ADS_ATTRIBUTED_KEY_CLICK_CONVERSION_DELAYED_TIER_3 = 224;
+  ADS_ATTRIBUTED_CLICK_CONVERSION_DELAYED_TIER_3 = 225;
+  ADS_PURCHASE_CONVERSION_DELAYED_TIER_3 = 226;
+  ADS_MID_FUNNEL_CONVERSION_DELAYED_TIER_3 = 227;
+  ADS_ADD_TO_CART_CONVERSION_DELAYED_TIER_3 = 228;
+  ADS_UPPER_FUNNEL_CONVERSION_DELAYED_TIER_3 = 229;
+  ADS_WEB_CONVERSION_DELAYED_TIER_3 = 230;
+  ADS_SEARCH_CONVERSION_DELAYED_TIER_3 = 231;
+  ADS_SIGN_UP_CONVERSION_DELAYED_TIER_3 = 232;
+  ADS_CHECKOUT_INITIATED_CONVERSION_DELAYED_TIER_3 = 233;
+  ADS_ATTRIBUTED_KEY_VIEW_CONVERSION_DELAYED = 234;
+  ADS_ATTRIBUTED_VIEW_CONVERSION_DELAYED = 235;
+  ADS_PURCHASE_CONVERSION_VIEW_THROUGH_DELAYED = 236;
+  ADS_ADD_TO_CART_CONVERSION_VIEW_THROUGH_DELAYED = 237;
+  ADS_CHECKOUT_INITIATED_CONVERSION_VIEW_THROUGH_DELAYED = 238;
+  ADS_SIGN_UP_CONVERSION_VIEW_THROUGH_DELAYED = 239;
+  ADS_ATTRIBUTED_KEY_VIEW_CONVERSION_DELAYED_TIER_2 = 240;
+  ADS_ATTRIBUTED_VIEW_CONVERSION_DELAYED_TIER_2 = 241;
+  ADS_PURCHASE_CONVERSION_VIEW_THROUGH_DELAYED_TIER_2 = 242;
+  ADS_ADD_TO_CART_CONVERSION_VIEW_THROUGH_DELAYED_TIER_2 = 243;
+  ADS_CHECKOUT_INITIATED_CONVERSION_VIEW_THROUGH_DELAYED_TIER_2 = 244;
+  ADS_SIGN_UP_CONVERSION_VIEW_THROUGH_DELAYED_TIER_2 = 245;
+  ADS_ATTRIBUTED_KEY_VIEW_CONVERSION_DELAYED_TIER_3 = 246;
+  ADS_ATTRIBUTED_VIEW_CONVERSION_DELAYED_TIER_3 = 247;
+  ADS_PURCHASE_CONVERSION_VIEW_THROUGH_DELAYED_TIER_3 = 248;
+  ADS_ADD_TO_CART_CONVERSION_VIEW_THROUGH_DELAYED_TIER_3 = 249;
+  ADS_CHECKOUT_INITIATED_CONVERSION_VIEW_THROUGH_DELAYED_TIER_3 = 250;
+  ADS_SIGN_UP_CONVERSION_VIEW_THROUGH_DELAYED_TIER_3 = 251;
+  reserved 252;
+  P_OPEN_LINK_P90 = 253;
+  ADS_MMP_CLICK = 254;
+  PLACE_HOLDER_255 = 255;
+}
+
+enum ContinuousActionName {
+  HOME_PROFILE_VISIT_SECS = 0;
+  DWELL_TIME = 1;
+  CLICK_DWELL_TIME = 2;
+  HOME_VIDEO_CONTINUATION_SECS = 3;
+  BRIDGE_PROBABILITY = 4;
+  ADS_WEB_CT_PURCHASE_VALUE = 5;
+  WEB_CONV_VALUE_USD = 6;
+  WEB_CONV_VALUE_RATIO = 7;
+}
+
+enum ActionGroup {
+  INVALID_GROUP = 0;
+  P_FAV = 1;
+  P_REPLY = 2;
+  P_RETWEET = 3;
+  P_CLICK = 4;
+  P_DWELL = 5;
+  P_SHARE = 6;
+  P_BOOKMARK = 7;
+  P_FOLLOW = 8;
+  P_REPORT = 9;
+  P_BLOCK = 10;
+  P_MUTE = 11;
+  P_VQV = 12;
+  P_NEXT = 13;
+}
+
+enum ActionCategory {
+  INVALID_CATEGORY = 0;
+  TWEET = 1;
+  AUTHOR = 2;
+}
+
+enum SemanticIdModel {
+  UNKNOWN_MODEL = 0;
+  DEEP_RETRIEVAL_TEXT_EMB = 1;
+  MULTIMODAL = 2;
+}
+
+enum LanguageCode {
+  LANG_UNKNOWN = 0;
+  LANG_AA = 1;
+  LANG_AB = 2;
+  LANG_AF = 3;
+  LANG_AK = 4;
+  LANG_AM = 5;
+  LANG_AR = 6;
+  LANG_AN = 7;
+  LANG_AS = 8;
+  LANG_AV = 9;
+  LANG_AY = 10;
+  LANG_AZ = 11;
+  LANG_BA = 12;
+  LANG_BE = 13;
+  LANG_BG = 14;
+  LANG_BH = 15;
+  LANG_BI = 16;
+  LANG_BM = 17;
+  LANG_BN = 18;
+  LANG_BO = 19;
+  LANG_BR = 20;
+  LANG_BS = 21;
+  LANG_CA = 22;
+  LANG_CE = 23;
+  LANG_CH = 24;
+  LANG_CO = 25;
+  LANG_CR = 26;
+  LANG_CS = 27;
+  LANG_CU = 28;
+  LANG_CV = 29;
+  LANG_CY = 30;
+  LANG_DA = 31;
+  LANG_DE = 32;
+  LANG_DV = 33;
+  LANG_DZ = 34;
+  LANG_EE = 35;
+  LANG_EL = 36;
+  LANG_EN = 37;
+  LANG_EO = 38;
+  LANG_ES = 39;
+  LANG_ET = 40;
+  LANG_EU = 41;
+  LANG_FA = 42;
+  LANG_FF = 43;
+  LANG_FI = 44;
+  LANG_FJ = 45;
+  LANG_FO = 46;
+  LANG_FR = 47;
+  LANG_FY = 48;
+  LANG_GA = 49;
+  LANG_GD = 50;
+  LANG_GL = 51;
+  LANG_GN = 52;
+  LANG_GU = 53;
+  LANG_GV = 54;
+  LANG_HA = 55;
+  LANG_HE = 56;
+  LANG_HI = 57;
+  LANG_HO = 58;
+  LANG_HR = 59;
+  LANG_HT = 60;
+  LANG_HU = 61;
+  LANG_HY = 62;
+  LANG_HZ = 63;
+  LANG_IA = 64;
+  LANG_ID = 65;
+  LANG_IE = 66;
+  LANG_IG = 67;
+  LANG_II = 68;
+  LANG_IK = 69;
+  LANG_IO = 70;
+  LANG_IS = 71;
+  LANG_IT = 72;
+  LANG_IU = 73;
+  LANG_JA = 74;
+  LANG_JV = 75;
+  LANG_KA = 76;
+  LANG_KG = 77;
+  LANG_KI = 78;
+  LANG_KJ = 79;
+  LANG_KK = 80;
+  LANG_KL = 81;
+  LANG_KM = 82;
+  LANG_KN = 83;
+  LANG_KO = 84;
+  LANG_KR = 85;
+  LANG_KS = 86;
+  LANG_KU = 87;
+  LANG_KV = 88;
+  LANG_KW = 89;
+  LANG_KY = 90;
+  LANG_LA = 91;
+  LANG_LB = 92;
+  LANG_LG = 93;
+  LANG_LI = 94;
+  LANG_LN = 95;
+  LANG_LO = 96;
+  LANG_LT = 97;
+  LANG_LU = 98;
+  LANG_LV = 99;
+  LANG_MG = 100;
+  LANG_MH = 101;
+  LANG_MI = 102;
+  LANG_MK = 103;
+  LANG_ML = 104;
+  LANG_MN = 105;
+  LANG_MR = 106;
+  LANG_MS = 107;
+  LANG_MT = 108;
+  LANG_MY = 109;
+  LANG_NA = 110;
+  LANG_NB = 111;
+  LANG_ND = 112;
+  LANG_NE = 113;
+  LANG_NG = 114;
+  LANG_NL = 115;
+  LANG_NN = 116;
+  LANG_NO = 117;
+  LANG_NR = 118;
+  LANG_NV = 119;
+  LANG_NY = 120;
+  LANG_OC = 121;
+  LANG_OJ = 122;
+  LANG_OM = 123;
+  LANG_OR = 124;
+  LANG_OS = 125;
+  LANG_PA = 126;
+  LANG_PI = 127;
+  LANG_PL = 128;
+  LANG_PS = 129;
+  LANG_PT = 130;
+  LANG_QU = 131;
+  LANG_RM = 132;
+  LANG_RN = 133;
+  LANG_RO = 134;
+  LANG_RU = 135;
+  LANG_RW = 136;
+  LANG_SA = 137;
+  LANG_SC = 138;
+  LANG_SD = 139;
+  LANG_SE = 140;
+  LANG_SG = 141;
+  LANG_SI = 142;
+  LANG_SK = 143;
+  LANG_SL = 144;
+  LANG_SM = 145;
+  LANG_SN = 146;
+  LANG_SO = 147;
+  LANG_SQ = 148;
+  LANG_SR = 149;
+  LANG_SS = 150;
+  LANG_ST = 151;
+  LANG_SU = 152;
+  LANG_SV = 153;
+  LANG_SW = 154;
+  LANG_TA = 155;
+  LANG_TE = 156;
+  LANG_TG = 157;
+  LANG_TH = 158;
+  LANG_TI = 159;
+  LANG_TK = 160;
+  LANG_TL = 161;
+  LANG_TN = 162;
+  LANG_TO = 163;
+  LANG_TR = 164;
+  LANG_TS = 165;
+  LANG_TT = 166;
+  LANG_TW = 167;
+  LANG_TY = 168;
+  LANG_UG = 169;
+  LANG_UK = 170;
+  LANG_UR = 171;
+  LANG_UZ = 172;
+  LANG_VE = 173;
+  LANG_VI = 174;
+  LANG_VO = 175;
+  LANG_WA = 176;
+  LANG_WO = 177;
+  LANG_XH = 178;
+  LANG_YI = 179;
+  LANG_YO = 180;
+  LANG_ZA = 181;
+  LANG_ZH = 182;
+  LANG_ZU = 183;
+  LANG_IN_OLD = 184;
+  LANG_IW_OLD = 185;
+  LANG_ART = 186;
+  LANG_UND = 187;
+  LANG_ZXX = 188;
+  LANG_CKB = 189;
+  LANG_QME = 190;
+  LANG_QST = 191;
+  LANG_QHT = 192;
+  LANG_QCT = 193;
+  LANG_QAM = 194;
+}
+
+enum CountryCode {
+  COUNTRY_UNKNOWN = 0;
+  COUNTRY_AD = 1;
+  COUNTRY_AE = 2;
+  COUNTRY_AF = 3;
+  COUNTRY_AG = 4;
+  COUNTRY_AI = 5;
+  COUNTRY_AL = 6;
+  COUNTRY_AM = 7;
+  COUNTRY_AO = 8;
+  COUNTRY_AQ = 9;
+  COUNTRY_AR = 10;
+  COUNTRY_AS = 11;
+  COUNTRY_AT = 12;
+  COUNTRY_AU = 13;
+  COUNTRY_AW = 14;
+  COUNTRY_AX = 15;
+  COUNTRY_AZ = 16;
+  COUNTRY_BA = 17;
+  COUNTRY_BB = 18;
+  COUNTRY_BD = 19;
+  COUNTRY_BE = 20;
+  COUNTRY_BF = 21;
+  COUNTRY_BG = 22;
+  COUNTRY_BH = 23;
+  COUNTRY_BI = 24;
+  COUNTRY_BJ = 25;
+  COUNTRY_BL = 26;
+  COUNTRY_BM = 27;
+  COUNTRY_BN = 28;
+  COUNTRY_BO = 29;
+  COUNTRY_BQ = 30;
+  COUNTRY_BR = 31;
+  COUNTRY_BS = 32;
+  COUNTRY_BT = 33;
+  COUNTRY_BV = 34;
+  COUNTRY_BW = 35;
+  COUNTRY_BY = 36;
+  COUNTRY_BZ = 37;
+  COUNTRY_CA = 38;
+  COUNTRY_CC = 39;
+  COUNTRY_CD = 40;
+  COUNTRY_CF = 41;
+  COUNTRY_CG = 42;
+  COUNTRY_CH = 43;
+  COUNTRY_CI = 44;
+  COUNTRY_CK = 45;
+  COUNTRY_CL = 46;
+  COUNTRY_CM = 47;
+  COUNTRY_CN = 48;
+  COUNTRY_CO = 49;
+  COUNTRY_CR = 50;
+  COUNTRY_CU = 51;
+  COUNTRY_CV = 52;
+  COUNTRY_CW = 53;
+  COUNTRY_CX = 54;
+  COUNTRY_CY = 55;
+  COUNTRY_CZ = 56;
+  COUNTRY_DE = 57;
+  COUNTRY_DJ = 58;
+  COUNTRY_DK = 59;
+  COUNTRY_DM = 60;
+  COUNTRY_DO = 61;
+  COUNTRY_DZ = 62;
+  COUNTRY_EC = 63;
+  COUNTRY_EE = 64;
+  COUNTRY_EG = 65;
+  COUNTRY_EH = 66;
+  COUNTRY_ER = 67;
+  COUNTRY_ES = 68;
+  COUNTRY_ET = 69;
+  COUNTRY_FI = 70;
+  COUNTRY_FJ = 71;
+  COUNTRY_FK = 72;
+  COUNTRY_FM = 73;
+  COUNTRY_FO = 74;
+  COUNTRY_FR = 75;
+  COUNTRY_GA = 76;
+  COUNTRY_GB = 77;
+  COUNTRY_GD = 78;
+  COUNTRY_GE = 79;
+  COUNTRY_GF = 80;
+  COUNTRY_GG = 81;
+  COUNTRY_GH = 82;
+  COUNTRY_GI = 83;
+  COUNTRY_GL = 84;
+  COUNTRY_GM = 85;
+  COUNTRY_GN = 86;
+  COUNTRY_GP = 87;
+  COUNTRY_GQ = 88;
+  COUNTRY_GR = 89;
+  COUNTRY_GS = 90;
+  COUNTRY_GT = 91;
+  COUNTRY_GU = 92;
+  COUNTRY_GW = 93;
+  COUNTRY_GY = 94;
+  COUNTRY_HK = 95;
+  COUNTRY_HM = 96;
+  COUNTRY_HN = 97;
+  COUNTRY_HR = 98;
+  COUNTRY_HT = 99;
+  COUNTRY_HU = 100;
+  COUNTRY_ID = 101;
+  COUNTRY_IE = 102;
+  COUNTRY_IL = 103;
+  COUNTRY_IM = 104;
+  COUNTRY_IN = 105;
+  COUNTRY_IO = 106;
+  COUNTRY_IQ = 107;
+  COUNTRY_IR = 108;
+  COUNTRY_IS = 109;
+  COUNTRY_IT = 110;
+  COUNTRY_JE = 111;
+  COUNTRY_JM = 112;
+  COUNTRY_JO = 113;
+  COUNTRY_JP = 114;
+  COUNTRY_KE = 115;
+  COUNTRY_KG = 116;
+  COUNTRY_KH = 117;
+  COUNTRY_KI = 118;
+  COUNTRY_KM = 119;
+  COUNTRY_KN = 120;
+  COUNTRY_KP = 121;
+  COUNTRY_KR = 122;
+  COUNTRY_KW = 123;
+  COUNTRY_KY = 124;
+  COUNTRY_KZ = 125;
+  COUNTRY_LA = 126;
+  COUNTRY_LB = 127;
+  COUNTRY_LC = 128;
+  COUNTRY_LI = 129;
+  COUNTRY_LK = 130;
+  COUNTRY_LR = 131;
+  COUNTRY_LS = 132;
+  COUNTRY_LT = 133;
+  COUNTRY_LU = 134;
+  COUNTRY_LV = 135;
+  COUNTRY_LY = 136;
+  COUNTRY_MA = 137;
+  COUNTRY_MC = 138;
+  COUNTRY_MD = 139;
+  COUNTRY_ME = 140;
+  COUNTRY_MF = 141;
+  COUNTRY_MG = 142;
+  COUNTRY_MH = 143;
+  COUNTRY_MK = 144;
+  COUNTRY_ML = 145;
+  COUNTRY_MM = 146;
+  COUNTRY_MN = 147;
+  COUNTRY_MO = 148;
+  COUNTRY_MP = 149;
+  COUNTRY_MQ = 150;
+  COUNTRY_MR = 151;
+  COUNTRY_MS = 152;
+  COUNTRY_MT = 153;
+  COUNTRY_MU = 154;
+  COUNTRY_MV = 155;
+  COUNTRY_MW = 156;
+  COUNTRY_MX = 157;
+  COUNTRY_MY = 158;
+  COUNTRY_MZ = 159;
+  COUNTRY_NA = 160;
+  COUNTRY_NC = 161;
+  COUNTRY_NE = 162;
+  COUNTRY_NF = 163;
+  COUNTRY_NG = 164;
+  COUNTRY_NI = 165;
+  COUNTRY_NL = 166;
+  COUNTRY_NO = 167;
+  COUNTRY_NP = 168;
+  COUNTRY_NR = 169;
+  COUNTRY_NU = 170;
+  COUNTRY_NZ = 171;
+  COUNTRY_OM = 172;
+  COUNTRY_PA = 173;
+  COUNTRY_PE = 174;
+  COUNTRY_PF = 175;
+  COUNTRY_PG = 176;
+  COUNTRY_PH = 177;
+  COUNTRY_PK = 178;
+  COUNTRY_PL = 179;
+  COUNTRY_PM = 180;
+  COUNTRY_PN = 181;
+  COUNTRY_PR = 182;
+  COUNTRY_PS = 183;
+  COUNTRY_PT = 184;
+  COUNTRY_PW = 185;
+  COUNTRY_PY = 186;
+  COUNTRY_QA = 187;
+  COUNTRY_RE = 188;
+  COUNTRY_RO = 189;
+  COUNTRY_RS = 190;
+  COUNTRY_RU = 191;
+  COUNTRY_RW = 192;
+  COUNTRY_SA = 193;
+  COUNTRY_SB = 194;
+  COUNTRY_SC = 195;
+  COUNTRY_SD = 196;
+  COUNTRY_SE = 197;
+  COUNTRY_SG = 198;
+  COUNTRY_SH = 199;
+  COUNTRY_SI = 200;
+  COUNTRY_SJ = 201;
+  COUNTRY_SK = 202;
+  COUNTRY_SL = 203;
+  COUNTRY_SM = 204;
+  COUNTRY_SN = 205;
+  COUNTRY_SO = 206;
+  COUNTRY_SR = 207;
+  COUNTRY_SS = 208;
+  COUNTRY_ST = 209;
+  COUNTRY_SV = 210;
+  COUNTRY_SX = 211;
+  COUNTRY_SY = 212;
+  COUNTRY_SZ = 213;
+  COUNTRY_TC = 214;
+  COUNTRY_TD = 215;
+  COUNTRY_TF = 216;
+  COUNTRY_TG = 217;
+  COUNTRY_TH = 218;
+  COUNTRY_TJ = 219;
+  COUNTRY_TK = 220;
+  COUNTRY_TL = 221;
+  COUNTRY_TM = 222;
+  COUNTRY_TN = 223;
+  COUNTRY_TO = 224;
+  COUNTRY_TR = 225;
+  COUNTRY_TT = 226;
+  COUNTRY_TV = 227;
+  COUNTRY_TW = 228;
+  COUNTRY_TZ = 229;
+  COUNTRY_UA = 230;
+  COUNTRY_UG = 231;
+  COUNTRY_UM = 232;
+  COUNTRY_US = 233;
+  COUNTRY_UY = 234;
+  COUNTRY_UZ = 235;
+  COUNTRY_VA = 236;
+  COUNTRY_VC = 237;
+  COUNTRY_VE = 238;
+  COUNTRY_VG = 239;
+  COUNTRY_VI = 240;
+  COUNTRY_VN = 241;
+  COUNTRY_VU = 242;
+  COUNTRY_WF = 243;
+  COUNTRY_WS = 244;
+  COUNTRY_YE = 245;
+  COUNTRY_YT = 246;
+  COUNTRY_ZA = 247;
+  COUNTRY_ZM = 248;
+  COUNTRY_ZW = 249;
+}
+
+enum ProductSurface {
+  PRODUCT_SURFACE_UNKNOWN = 0;
+  PRODUCT_SURFACE_HOME_TIMELINE_RANKING = 1;
+  PRODUCT_SURFACE_HOME_TIMELINE_LATEST = 2;
+  PRODUCT_SURFACE_NOTIFICATION_TAB = 3;
+  PRODUCT_SURFACE_PUSH_NOTIFICATION = 4;
+  PRODUCT_SURFACE_EMAIL_NOTIFICATION = 5;
+  PRODUCT_SURFACE_SEARCH_RESULTS_PAGE = 6;
+  PRODUCT_SURFACE_SEARCH_TYPEAHEAD = 7;
+  PRODUCT_SURFACE_TWEET_DETAILS_PAGE = 8;
+  PRODUCT_SURFACE_PROFILE_PAGE = 9;
+  PRODUCT_SURFACE_GALLERY_PAGE = 10;
+  PRODUCT_SURFACE_MEDIA_PAGE = 11;
+  PRODUCT_SURFACE_COMMUNITY_RANKED = 12;
+  PRODUCT_SURFACE_COMMUNITIES_TIMELINE = 13;
+  PRODUCT_SURFACE_EXPLORE_PAGE = 14;
+  PRODUCT_SURFACE_HOME_TIMELINE_RANKED_FOLLOWING = 15;
+  PRODUCT_SURFACE_TREND_PAGE = 16;
+  PRODUCT_SURFACE_EXPLORE_SPOTLIGHT = 17;
+  PRODUCT_SURFACE_PLACE_HOLDER_18 = 18;
+  PRODUCT_SURFACE_PLACE_HOLDER_19 = 19;
+  PRODUCT_SURFACE_PLACE_HOLDER_20 = 20;
+}
+
+enum Page {
+  PAGE_UNKNOWN = 0;
+  PAGE_AI_TREND = 1;
+  PAGE_APP = 2;
+  PAGE_BIRDWATCH = 3;
+  PAGE_BIRDWATCH_HOME_PAGE = 4;
+  PAGE_BLOCKED_PROFILE = 5;
+  PAGE_BOOKMARK_FOLDER = 6;
+  PAGE_BOOKMARK_FOLDERS = 7;
+  PAGE_BOOKMARKS = 8;
+  PAGE_CHROME = 9;
+  PAGE_COMMUNITIES = 10;
+  PAGE_COMMUNITIES_EXPLORE = 11;
+  PAGE_COMMUNITY = 12;
+  PAGE_COMMUNITY_TWEETS_SEARCH = 13;
+  PAGE_COMPOSE = 14;
+  PAGE_DOCK = 15;
+  PAGE_EDIT_HISTORY = 16;
+  PAGE_EXPLORE = 17;
+  PAGE_FOLLOWERS = 18;
+  PAGE_FULL_TWEET_ACTIVITY = 19;
+  PAGE_GALLERY = 20;
+  PAGE_GENERIC_TIMELINE = 21;
+  PAGE_GROK = 22;
+  PAGE_GROK_ANDROID = 23;
+  PAGE_GROK_DRAWER = 24;
+  PAGE_GROK_CONVO = 25;
+  PAGE_GROK_ROOT = 26;
+  PAGE_GUIDE = 27;
+  PAGE_HOME = 28;
+  PAGE_LIST = 29;
+  PAGE_LIVE_EVENT_TIMELINE = 30;
+  PAGE_ME = 31;
+  PAGE_MEDIA = 32;
+  PAGE_MESSAGES = 33;
+  PAGE_MOMENTS = 34;
+  PAGE_NBA_GAME = 35;
+  PAGE_NBA_LEAGUE = 36;
+  PAGE_NTAB = 37;
+  PAGE_OFFLINE_CACHE = 38;
+  PAGE_ONBOARDING = 39;
+  PAGE_PAGE = 40;
+  PAGE_PERISCOPE_WATCH = 41;
+  PAGE_PINNED_TWEETS_LANDING = 42;
+  PAGE_PLACE = 43;
+  PAGE_PLAYER_LONG = 44;
+  PAGE_PROFILE = 45;
+  PAGE_QUOTE = 46;
+  PAGE_QUOTE_TWEETS_TIMELINE = 47;
+  PAGE_REPORT_ADS = 48;
+  PAGE_REPORT_ANNOYING = 49;
+  PAGE_REPORT_ENCOURAGING_SELF_HARM = 50;
+  PAGE_REPORT_HARASSED = 51;
+  PAGE_REPORT_HATEFUL_CONDUCT = 52;
+  PAGE_REPORT_OFFENSIVE = 53;
+  PAGE_REPORT_PRIVATE_INFO = 54;
+  PAGE_REPORT_SENSITIVE_INFO = 55;
+  PAGE_REPORT_SPAM = 56;
+  PAGE_REPORT_VIOLENCE = 57;
+  PAGE_SEARCH = 58;
+  PAGE_SETTINGS = 59;
+  PAGE_SPHERES_DETAIL = 60;
+  PAGE_THREAD = 61;
+  PAGE_TOP_ARTICLES = 62;
+  PAGE_TOPIC_LANDING = 63;
+  PAGE_TOPIC_TIMELINE = 64;
+  PAGE_TRENDING_EVENT_TIMELINE = 65;
+  PAGE_TWEET = 66;
+  PAGE_UNDO_TWEET_DETAILS = 67;
+  PAGE_VOICE_DOCK = 68;
+  PAGE_WEB_VIEW = 69;
+  PAGE_CONNECT = 70;
+  PAGE_AI_TREND_DETAIL = 71;
+  PAGE_F1_RACE = 72;
+  PAGE_JETFUEL_PAGE = 73;
+  PAGE_GROK_IOS = 74;
+  PAGE_GROK_IOS_DUPLICATE = 75;
+  PAGE_GROK_ANDROID_DUPLICATE = 76;
+  PAGE_ARTICLE_PREVIEW = 77;
+  PAGE_DEMONSLAYER = 78;
+  PAGE_DRAFT_TWEET_PREVIEWS = 79;
+  PAGE_REPORT_SELF_HARM = 80;
+  PAGE_NFL_LEAGUE = 81;
+  PAGE_ARTICLE_COMPOSER = 82;
+  PAGE_GROK_WEB = 83;
+  PAGE_ARTICLE = 84;
+  PAGE_VIDEO_PLAYER = 85;
+  PAGE_HOME_LATEST = 86;
+  PAGE_SOCCER_MATCH = 87;
+  PAGE_AUDIOSPACE = 88;
+  PAGE_ARTICLE_WEBVIEW_CONTAINER = 89;
+  PAGE_AUDIO_DOCK = 90;
+  PAGE_FAVORITED_YOU = 91;
+  PAGE_WAC = 92;
+  PAGE_HIDDEN = 93;
+  PAGE_NEWS = 94;
+  PAGE_NEWS_ARTICLE = 95;
+  PAGE_QUOTE_TWEETS = 96;
+  PAGE_NOTIFICATION = 97;
+}
+
+enum Gender {
+  GENDER_ZERO_INX_PLACEHOLDER = 0;
+  MALE = 1;
+  FEMALE = 2;
+  UNKNOWN = 3;
+}
+
+enum MaskType {
+  UNKNOWN_MASK = 0;
+  NEW_EVENT = 1;
+}
+
+enum UserType {
+  USER_TYPE_UNKNOWN = 0;
+  NORMAL = 1;
+  SOFT = 2;
+  LOGGED_OUT = 3;
+}
+
+enum AppPushDeviceType {
+  APP_PUSH_DEVICE_TYPE_UNKNOWN = 0;
+  PUSH = 1;
+  VOIP_PUSH = 2;
+}
+
+enum SubscriptionLevel {
+  SUBSCRIPTION_LEVEL_UNKNOWN = 0;
+  BASIC = 1;
+  PREMIUM = 2;
+  PREMIUM_PLUS = 3;
+  RESERVED_4 = 4;
+  RESERVED_5 = 5;
+  RESERVED_6 = 6;
+}
+
+enum AdsActionName {
+  ZERO_INX_PLACEHOLDER = 0;
+  ADS_VIEW = 1;
+  ADS_MONETIZABLE = 2;
+  ADS_POSITIVE = 3;
+  ADS_NEGATIVE = 4;
+  ADS_SOCIAL = 5;
+  ADS_PERFORMANCE = 6;
+  ADS_FOLLOW = 7;
+  ADS_DWELL_LONG_ON_PERFORMANCE = 8;
+  ADS_SOCIAL_ENGAGEMENT = 9;
+  ADS_ORGANIC_WEB_CONVERSION = 10;
+  ADS_CONVERSION_OCT_ON_PERFORMANCE = 11;
+  ADS_CONVERSION_MACT_ON_PERFORMANCE = 12;
+  ADS_CONVERSION_OCT_KEY_ON_PERFORMANCE = 13;
+  ADS_PERFORMANCE_FOR_VIDEO_VIEW = 14;
+}
+
+message AuthorInfo {
+  uint64 authorId = 1;
+  bool isFollowedByUser = 2;
+  optional uint64 followers = 3;
+  optional bool isFollowingUser = 4;
+}
+
+message TweetBoolFeatures {
+  bool is_for_you_page = 1;
+  bool is_promoted_tweet = 2;
+  bool is_reply = 3;
+  bool is_retweet = 4;
+  bool is_quote = 5;
+  bool has_media = 6;
+}
+
+message SemanticIds {
+  SemanticIdModel model = 1;
+  repeated int32 semanticIds = 2;
+}
+
+message UserActionMeta {
+  uint64 indexInSequence = 1;
+  string page = 2;
+  double dwellTime = 3;
+  string clientPlatform = 4;
+  uint64 clientAppId = 5;
+  uint64 actionAddedToSequenceEpochMs = 6;
+  CountryCode engagingIpCountryCode = 7;
+  string ipAddress = 8;
+  ProductSurface productSurface = 9;
+  optional uint64 servedTimeMs = 10;
+  bool isTrainableConversion = 11;
+  string searchQuery = 12;
+  string section = 13;
+  uint64 externalLinkSessionDurationMs = 14;
+  string clientVersion = 15;
+  string clientTweetOpenLinkUrl = 16;
+  string timeZone = 17;
+  double deviceBatteryLevel = 18;
+  string deviceNetworkType = 19;
+  double deviceBrightnessLevel = 20;
+  bool deviceIsCharging = 21;
+  double deviceMaxStorage = 22;
+  double deviceAvailableStorage = 23;
+  uint64 requestJoinId = 24;
+  int64 servedId = 25;
+  int64 predictionId = 26;
+  uint64 safetyLabelMask = 27;
+  optional uint32 percent_screen_height_100k = 28;
+  optional uint64 fair_view_time_ms = 29;
+}
+
+message TweetInfo {
+  uint64 tweetId = 1;
+  uint64 authorId = 2;
+  uint64 retweetingTweetId = 3;
+  uint64 quotingTweetId = 4;
+  uint64 replyingTweetId = 5;
+  uint64 quotedTweetId = 6;
+  uint64 inReplyToTweetId = 7;
+  uint64 retweetedTweetId = 8;
+  uint64 editedTweetId = 9;
+  uint64 promotedId = 10;
+  TweetBoolFeatures tweetBoolFeatures = 11;
+  repeated int32 semanticIds = 12;
+  repeated SemanticIds semanticModelIds = 13;
+  AuthorInfo authorInfo = 14;
+  uint64 retweetingAuthorId = 15;
+  uint64 quotedAuthorId = 16;
+  uint64 inReplyToAuthorId = 17;
+  uint64 quotingAuthorId = 18;
+  LanguageCode languageCode = 19;
+  uint32 tweetTimelinePosition = 20;
+  uint64 favCount = 21;
+  uint64 replyCount = 22;
+  uint64 retweetCount = 23;
+  uint64 quoteCount = 24;
+  bool isAuthorFollowedByUser = 25;
+  repeated float embedding = 26;
+  uint64 firstVideoDurationMs = 27;
+  uint64 viewCount = 28;
+
+  AdInfo ad_info = 29;
+  uint64 minVideoDurationMs = 30;
+  uint64 reactingTweetId = 31;
+  uint64 reactingAuthorId = 32;
+  uint64 safetyLabelMask = 33;
+  uint64 bookmarkCount = 34;
+
+  ScoreInfo scoreInfo = 35;
+  ContentFeatures contentFeatures = 36;
+  ContentFeatures quotedContentFeatures = 37;
+  SearchLexicalMatch searchLexicalMatch = 38;
+  PostEngagerFeatures postEngagers = 39;
+}
+
+message SearchLexicalMatch {
+  float matchedWordFraction = 1;
+  bool exactPhrase = 2;
+}
+
+message PostEngagerFeatures {
+  repeated uint64 userIds = 1;
+  repeated uint32 actionBits = 2;
+  repeated uint32 ageSecs = 3;
+  uint32 numPositive = 4;
+}
+
+message ContentFeatures {
+  bool hasVideo = 1;
+  uint32 maxVideoDurationMs = 2;
+  bool hasPhoto = 3;
+  uint32 mediaCount = 4;
+  uint32 weightedTextLen = 5;
+  uint32 newlineCount = 6;
+  bool hasUrl = 7;
+}
+
+message ScoreInfo {
+  map<string, double> predictionScores = 1;
+  optional double weightedScore = 2;
+  optional double finalScore = 3;
+  SlateContext slateContext = 4;
+  optional double rewardRerankSlotProb = 5;
+  optional uint32 rerankerHeadTag = 6;
+  optional double pageDecodeSlotProb = 7;
+  repeated uint32 predictionHeads = 8;
+  repeated float predictionValues = 9;
+}
+
+message SlateContext {
+  uint32 k = 1;
+  uint32 poolRank = 2;
+  optional uint32 poolRankGap = 3;
+  double fatigue = 4;
+  double preDiversityScore = 5;
+  bool sidKnown = 6;
+  uint32 sidK1 = 7;
+  uint32 sidK2 = 8;
+  uint32 sidK3 = 9;
+  optional uint32 sidGap1 = 10;
+  optional uint32 sidGap2 = 11;
+  optional uint32 sidGap3 = 12;
+  optional uint32 reconCosMilli = 13;
+  optional uint32 reconCountAbove = 14;
+  optional uint32 reconGapAbove = 15;
+  optional uint32 exactK = 16;
+  optional uint32 exactGap = 17;
+}
+
+message ActionInfo {
+  uint64 engagementTimeMs = 1;
+
+  ActionName actionName = 2;
+  ActionCategory actionCategory = 3;
+  ActionGroup actionGroup = 4;
+  UserActionMeta userActionMeta = 5;
+}
+
+message UserAction {
+  uint64 userId = 1;
+
+  TweetInfo tweetInfo = 2;
+
+  ActionInfo actionInfo = 3;
+
+  AdInfo adInfo = 4;
+}
+
+message AggregatedUserAction {
+  int64 userId = 1;
+  TweetInfo tweetInfo = 2;
+  repeated ActionInfo actions = 3;
+  int64 impressedTimeMs = 4;
+  AdInfo adInfo = 5;
+}
+
+message UserActionSequenceMeta {
+  uint64 length = 1;
+
+  uint64 firstSequenceTime = 2;
+  uint64 lastSequenceTime = 3;
+
+  uint64 lastModifiedEpochMs = 4;
+  uint64 previousKafkaPublishEpochMs = 5;
+
+  int64 deltaActionMask = 7;
+}
+
+message UserActionSequence {
+  uint64 userId = 1;
+
+  repeated UserAction userActions = 2;
+
+  UserActionSequenceMeta metadata = 3;
+
+  UserActionSequenceDataContainer userActionsData = 4;
+
+  UserInfo userInfo = 5;
+
+  string anonymizedUserId = 6;
+
+  AdUserInfo adUserInfo = 7;
+
+  repeated Mask masks = 8;
+
+  optional uint32 rerankerHeadTag = 9;
+}
+
+message UserActionList {
+  repeated UserAction user_actions = 1;
+}
+
+message AggregatedUserActionList {
+  repeated AggregatedUserAction aggregatedUserActions = 1;
+  string aggregationProvider = 2;
+  uint64 aggregationTimeMs = 3;
+}
+
+message UserActionSequenceDataContainer {
+  oneof data {
+    CompressedUserActionSequence compressedUserActions = 1;
+    UserActionList orderedUserActionList = 2;
+    AggregatedUserActionList orderedAggregatedUserActionsList = 3;
+    UserAdActionList orderedUserAdActionList = 4;
+    AggregatedUserAdActionList orderedAggregatedUserAdActionList = 5;
+  }
+}
+
+enum CompressionType {
+  INVALID = 0;
+  ZSTD = 1;
+}
+
+message CompressedUserActionSequence {
+  bytes data = 1;
+  CompressionType compression_type = 2;
+}
+
+message AdsCandidateSet {
+  uint64 userId = 1;
+
+  repeated UserAction candidates = 2;
+
+  uint64 admixerRequestId = 3;
+}
+
+message AdActionInfo {
+  int64 engagementTimeMs = 1;
+  AdsActionName actionName = 2;
+  double recordWeight = 3;
+  string transactionId = 5;
+  bool isKeyConversion = 6;
+  int32 bridgeType = 8;
+  bool isTwclidBridged = 9;
+  int32 engagementType = 10;
+  map<int32, double> predictedRawEngagementRates = 11;
+  map<string, double> continuousFeatures = 12;
+  map<string, int64> discreteFeatures = 13;
+  map<string, bool> booleanFeatures = 14;
+}
+
+enum UnifiedCardType {
+  UNIFIED_CARD_TYPE_UNSPECIFIED = 0;
+  IMAGE_WEBSITE = 1;
+  VIDEO_WEBSITE = 2;
+  IMAGE_APP = 3;
+  VIDEO_APP = 4;
+  IMAGE_AND_URLS = 5;
+  VIDEO_AND_URLS = 6;
+  IMAGE_CAROUSEL_WEBSITE = 7;
+  IMAGE_CAROUSEL_APP = 8;
+  VIDEO_CAROUSEL_WEBSITE = 9;
+  VIDEO_CAROUSEL_APP = 10;
+  VIDEO_PLAYABLE_APP = 11;
+  IMAGE = 12;
+  VIDEO = 13;
+  IMAGE_AND_BUTTON_WEBSITE = 14;
+  VIDEO_AND_BUTTON_WEBSITE = 15;
+  PRODUCT = 16;
+  SUMMARY_LARGE_IMAGE = 17;
+  IMAGE_MULTI_DEST_CAROUSEL_APP = 18;
+  VIDEO_MULTI_DEST_CAROUSEL_APP = 19;
+  IMAGE_MULTI_DEST_CAROUSEL_WEBSITE = 20;
+  VIDEO_MULTI_DEST_CAROUSEL_WEBSITE = 21;
+  MIXED_MEDIA_SINGLE_DEST_CAROUSEL_APP = 22;
+  MIXED_MEDIA_SINGLE_DEST_CAROUSEL_WEBSITE = 23;
+  MIXED_MEDIA_MULTI_DEST_CAROUSEL_APP = 24;
+  MIXED_MEDIA_MULTI_DEST_CAROUSEL_WEBSITE = 25;
+  MODEL_EXPLORER_WEBSITE = 26;
+  VIDEO_PLAYABLE_WEBSITE = 27;
+  IMAGE_COLLECTION_WEBSITE = 29;
+}
+
+message DpaProductInfo {
+  int64 product_key = 1;
+  bool is_hero = 2;
+  int64 gender_impressions = 3;
+  int64 gender_clicks = 4;
+  int32 gpc_l1_id = 5;
+  int32 gpc_l2_id = 6;
+  int32 gpc_l3_id = 7;
+  repeated int32 sid_codes = 8;
+}
+
+message AdInfo {
+  int64 impressionId = 11;
+
+  int64 promotedTweetId = 1;
+  int64 lineItemId = 2;
+  int64 advertiserId = 3;
+  int64 campaignId = 4;
+  int64 authorId = 5;
+  string promotedAppId = 6;
+
+  int64 lineItemObjective = 7;
+  int64 bidType = 8;
+  int64 bidUnit = 9;
+  int64 optimizationAlgorithm = 10;
+  int32 displayLocation = 12;
+  int64 pixelId = 13;
+
+  int32 impressionInsertionPosition = 14;
+
+  int64 fundingInstrumentId = 16;
+
+  UnifiedCardType unified_card_type = 18;
+
+  int64 product_set_id = 19;
+  int64 line_item_daily_budget_local_micro = 20;
+
+  repeated int64 product_keys = 21;
+
+  DpaProductInfo dpa_product_info = 22;
+
+  EngagementCounts engagement_counts = 23;
+
+  EngagementCounts viewer_advertiser_engagement_counts = 24;
+
+  EngagementCounts viewer_advertiser_conversion_counts = 25;
+
+  repeated int64 post_video_media_ids = 26;
+}
+
+message UserAdActionMeta {
+  int64 requestTimeMs = 1;
+  bool isLoggedOut = 2;
+}
+
+message ContentActionInfo {
+  oneof data {
+    ActionInfo actionInfo = 1;
+    AdActionInfo adActionInfo = 2;
+  }
+}
+
+message UserAdAction {
+  int64 userId = 1;
+  int64 impressionId = 2;
+  AdInfo adInfo = 3;
+  AdActionInfo actionInfo = 4;
+  UserAdActionMeta meta = 5;
+  TweetInfo tweetInfo = 6;
+  ContentActionInfo contentActionInfo = 7;
+  string anonymizedUserId = 8;
+}
+
+message AggregatedUserAdAction {
+  int64 userId = 1;
+  AdInfo adInfo = 2;
+  repeated ContentActionInfo adActions = 3;
+  int64 impressedTimeMs = 4;
+  TweetInfo tweetInfo = 5;
+  string anonymizedUserId = 6;
+}
+
+message UserAdActionList {
+  repeated UserAdAction userAdActions = 1;
+}
+
+message UserAdActionListKeyed {
+  string anonymizedRawId = 1;
+  repeated UserAdAction userAdActions = 2;
+  int64 userId = 3;
+}
+
+message AggregatedUserAdActionList {
+  repeated AggregatedUserAdAction aggregatedUserAdActions = 1;
+}
+
+message Mask {
+  MaskType maskType = 1;
+  repeated bool mask = 2;
+}
+
+message AppPushDevice {
+  int32 clientApplicationId = 1;
+  AppPushDeviceType deviceType = 2;
+}
+
+message UserAccountInfo {
+  CountryCode countryCode = 1;
+  int32 utcOffsetSeconds = 2;
+  bool geoEnabled = 3;
+  bool nsfwView = 4;
+  bool allowAdsPersonalization = 5;
+  bool hasHighlineProfile = 6;
+}
+
+message UserSafetyInfo {
+  bool verified = 1;
+  bool isProtected = 2;
+  bool deactivated = 3;
+  bool nsfwUser = 4;
+  bool nsfwAdmin = 5;
+  bool isBlueVerified = 6;
+  SubscriptionLevel subscriptionLevel = 7;
+  bool isSuspended = 8;
+}
+
+message UserInfo {
+  int64 createdAtMs = 1;
+  int64 updatedAtMs = 2;
+  bool hasProfileImage = 3;
+  UserType userType = 4;
+  LanguageCode profileDescriptionLanguage = 5;
+  UserAccountInfo userAccountInfo = 6;
+  UserSafetyInfo userSafetyInfo = 7;
+  repeated AppPushDevice appPushDevices = 8;
+  int32 ageInYears = 9;
+  bool isTrainable = 10;
+  string countryCode = 11;
+  string languageCode = 12;
+  string userAgent = 13;
+  bool autoplayEnabled = 14;
+  int32 clientId = 15;
+  bool isIos = 16;
+  bool isAndroid = 17;
+  string deviceType = 18;
+}
+
+message AdUserInfo {
+  Gender gender = 1;
+  AgeBucket ageBucket = 2;
+  string userCountryRegion = 3;
+  repeated string userLanguages = 4;
+}
+
+service RecsysDataLoader {
+  rpc GetTrainingBatch(GetTrainingBatchRequest)
+      returns (GetTrainingBatchResponse) {}
+
+  rpc GetColumnarTrainingBatch(GetTrainingBatchRequest)
+      returns (GetColumnarTrainingBatchResponse) {}
+}
+
+message GetTrainingBatchRequest {
+  uint32 requested_batch_size = 1;
+  uint32 trainer_id = 2;
+  uint32 num_trainers = 3;
+  optional uint32 candidate_length = 4;
+  optional uint32 history_seq_length = 5;
+}
+
+message GetColumnarTrainingBatchResponse {
+  repeated int64 user_id_seq = 1;
+
+  repeated uint64 candidate_tweet_id_seq = 2;
+  repeated uint64 candidate_author_id_seq = 3;
+  repeated int64 candidate_impressed_time_ms_seq = 4;
+  repeated uint64 candidate_action_name_multi_hot_seq_seq = 5;
+  repeated uint32 candidate_length_seq = 6;
+
+  repeated uint64 tweet_id_seq = 7;
+  repeated uint64 author_id_seq = 8;
+  repeated int64 impressed_time_ms_seq = 9;
+  repeated uint64 action_name_multi_hot_seq_seq = 10;
+  repeated uint32 history_length_seq = 11;
+}
+
+message TrainingExample {
+  UserActionSequence user_action_sequence = 1;
+
+  CandidateSet candidate_set = 2;
+
+  repeated uint64 action_labels = 3;
+}
+
+message GetTrainingBatchResponse {
+  repeated TrainingExample training_examples = 1;
+}
+
+message FetchUserActionRequest {
+  int64 user_id = 1;
+  uint64 start_time_ms = 2;
+  uint64 end_time_ms = 3;
+  uint32 user_sequence_length_limit = 4;
+}
+
+message FetchUserActionResponse {
+  int32 error_code = 1;
+  string error_message = 2;
+  repeated UserAction user_actions = 3;
+}
+
+message BatchFetchUserActionRequest {
+  repeated FetchUserActionRequest requests = 1;
+}
+
+message ColumnarFetchUserActionResponse {
+  repeated int64 user_id_seq = 1;
+  repeated uint64 tweet_id_seq = 2;
+  repeated uint64 author_id_seq = 3;
+  repeated int64 impressed_time_ms_seq = 4;
+  repeated uint32 action_seq = 5;
+  repeated uint32 history_length_seq = 6;
+}
+
+service UserActionSequenceService {
+  rpc GetUserActionSequence(FetchUserActionRequest)
+      returns (FetchUserActionResponse) {}
+
+  rpc GetColumnarUserActionSequence(BatchFetchUserActionRequest)
+      returns (ColumnarFetchUserActionResponse) {}
+}
+
+enum UserActionAggregationAlgorithmType {
+  INVALID_ALGORITHM = 0;
+  V1 = 1;
+}
+
+enum UserActionAggregationType {
+  INVALID_TYPE = 0;
+  ALL = 1;
+  DENSE = 2;
+  DENSE_WITH_CLICK_DWELL = 3;
+  ADS = 4 [deprecated = true];
+  DENSE_WITH_UPSAMPLE_SEARCH = 5;
+  DENSE_WITH_LATEST = 6;
+  DENSE_WITH_NOT_INTERESTED_IN = 7;
+  DENSE_WITH_LIMITED_QUOTED_ACTION = 8;
+  UPSAMPLED_ADS = 9 [deprecated = true];
+  DENSE_WITH_PROFILE_LONG_DWELL = 10;
+  NOTIFICATIONS = 11;
+  DENSE_WITH_CONTEXT_FEATURES = 12;
+  NOTIFICATIONS_MORE = 13;
+  ADS_CONVERSION = 14 [deprecated = true];
+  DENSE_WITH_LONG_DWELL = 15;
+  ADS_CHAD = 16;
+  NON_DENSE_WITH_NOT_INTERESTED_IN = 17;
+  NOTIFICATIONS_TIMEZONE = 18;
+  DENSE_WITH_FAV_VQV_CLEANED = 19;
+  DENSE_WITH_SHORT_DWELL = 20;
+  DENSE_WITH_NOT_INTERESTED_IN_64 = 21;
+  ADS_CHAD_NO_POST_IDS_IN_HISTORY = 22;
+  DENSE_WITH_PROFILE_IN_NETWORK_GATED = 23;
+  NOTIFICATIONS_LONG_DWELL = 24;
+  NOTIFICATIONS_SHORT_AND_LONG_DWELL = 25;
+  IMMERSIVE = 26;
+  ADS_CHAD_WITH_CONV_TYPES = 27;
+  ADS_WITH_KV_AD_HISTORY = 28;
+  IMMERSIVE_LONG_DWELL = 29;
+  DENSE_WITH_LONG_DWELL_HOME_EXCURSION = 30;
+  PLACEHOLDER_31 = 31;
+  PLACEHOLDER_32 = 32;
+}
+
+message UserActionAggregationResponse {
+  repeated uint64 user_ids = 1;
+  repeated UserActionSequence sequences = 2;
+  repeated UserActionAggregationType aggregation_types = 3;
+  repeated bytes columnar_sequences = 4;
+}
+
+service UserActionAggregationService {
+  rpc FetchAggregatedUserActions(FetchAggregatedUserActionRequests)
+      returns (UserActionAggregationResponse) {}
+}
+
+enum UserActionSequenceSourceDataType {
+  SOURCE_DATA_TYPE_UNSPECIFIED = 0;
+  SOURCE_DATA_TYPE_RESERVED_1 = 1;
+  ARROW = 2;
+  SOURCE_DATA_TYPE_RESERVED_3 = 3;
+  SOURCE_DATA_TYPE_RESERVED_4 = 4;
+  ARROW_WITH_WEB_CONVERSION = 5;
+  NEW_UUA_ARROW = 6;
+  NEW_UUA_ARROW_WITH_WEB_CONVERSION = 7;
+}
+
+enum ResponseFormat {
+  RESPONSE_FORMAT_UNSPECIFIED = 0;
+  RESPONSE_FORMAT_PROTO = 1;
+  RESPONSE_FORMAT_ARROW = 2;
+}
+
+enum UaasModelType {
+  UAAS_MODEL_TYPE_UNSPECIFIED = 0;
+  UAAS_MODEL_TYPE_RANKING = 1;
+  UAAS_MODEL_TYPE_RETRIEVAL = 2;
+}
+
+enum UaasProductSurface {
+  UAAS_PRODUCT_SURFACE_UNSPECIFIED = 0;
+  UAAS_PRODUCT_SURFACE_HOME = 1;
+  UAAS_PRODUCT_SURFACE_IMMERSIVE = 2;
+  UAAS_PRODUCT_SURFACE_SEARCH = 3;
+  UAAS_PRODUCT_SURFACE_NOTIF = 4;
+  UAAS_PRODUCT_SURFACE_ADS = 5;
+  UAAS_PRODUCT_SURFACE_REPLY = 6;
+}
+
+message FetchAggregatedUserActionRequest {
+  int64 user_id = 1;
+  uint32 window_time_ms = 2;
+  UserActionAggregationType aggregation_type = 3;
+  uint32 max_sequence_length = 4;
+  UserActionSequenceSourceDataType sourceDataType = 5;
+  ResponseFormat response_format = 6;
+  optional int64 request_id = 7;
+  optional uint64 seed_post_id = 8;
+}
+
+message FetchAggregatedUserActionRequests {
+  repeated FetchAggregatedUserActionRequest requests = 1;
+  string client_id = 2;
+  UaasModelType model_type = 3;
+  UaasProductSurface product_surface = 4;
+  map<string, string> feature_switch_overrides = 5;
+}
+
+message ChunkMetadata {
+  uint64 start_time_ms = 1;
+  uint64 end_time_ms = 2;
+  uint32 action_count = 3;
+}
+
+message UserMetadata {
+  repeated ChunkMetadata chunks = 1;
+  uint64 total_actions = 2;
+  uint64 last_updated_ms = 3;
+  uint64 first_sequence_time_ms = 4;
+  uint64 last_sequence_time_ms = 5;
+}
+
+enum AgeBucket {
+  AGE_UNKNOWN = 0;
+  AGE_UNDER_13 = 1;
+  AGE_13_TO_17 = 2;
+  AGE_18_TO_24 = 3;
+  AGE_25_TO_34 = 4;
+  AGE_35_TO_44 = 5;
+  AGE_45_TO_54 = 6;
+  AGE_55_TO_64 = 7;
+  AGE_OVER_65 = 8;
+  AGE_18_TO_49 = 9;
+  AGE_25_TO_54 = 10;
+  AGE_OVER_21 = 11;
+  AGE_18_TO_34 = 12;
+  AGE_13_TO_24 = 13;
+  AGE_13_TO_34 = 14;
+  AGE_13_TO_49 = 15;
+  AGE_13_TO_54 = 16;
+  AGE_OVER_13 = 17;
+  AGE_18_TO_54 = 18;
+  AGE_OVER_18 = 19;
+  AGE_21_TO_34 = 20;
+  AGE_21_TO_49 = 21;
+  AGE_21_TO_54 = 22;
+  AGE_25_TO_49 = 23;
+  AGE_OVER_25 = 24;
+  AGE_35_TO_49 = 25;
+  AGE_35_TO_54 = 26;
+  AGE_OVER_35 = 27;
+  AGE_OVER_50 = 28;
+  AGE_13_TO_19 = 29;
+  AGE_13_TO_29 = 30;
+  AGE_13_TO_39 = 31;
+  AGE_20_TO_29 = 32;
+  AGE_20_TO_34 = 33;
+  AGE_20_TO_39 = 34;
+  AGE_20_TO_49 = 35;
+  AGE_OVER_20 = 36;
+  AGE_30_TO_39 = 37;
+  AGE_30_TO_49 = 38;
+  AGE_OVER_30 = 39;
+  AGE_40_TO_49 = 40;
+  AGE_OVER_40 = 41;
+}
+
+enum Timezone {
+  TIMEZONE_UNKNOWN = 0;
+  TIMEZONE_AMERICA_NEW_YORK = 1;
+  TIMEZONE_AMERICA_CHICAGO = 2;
+  TIMEZONE_AMERICA_LOS_ANGELES = 3;
+  TIMEZONE_AMERICA_DENVER = 4;
+  TIMEZONE_AMERICA_SAO_PAULO = 5;
+  TIMEZONE_EUROPE_LONDON = 6;
+  TIMEZONE_EUROPE_PARIS = 7;
+  TIMEZONE_EUROPE_BERLIN = 8;
+  TIMEZONE_EUROPE_MADRID = 9;
+  TIMEZONE_EUROPE_ROME = 10;
+  TIMEZONE_EUROPE_AMSTERDAM = 11;
+  TIMEZONE_EUROPE_ISTANBUL = 12;
+  TIMEZONE_EUROPE_MOSCOW = 13;
+  TIMEZONE_ASIA_TOKYO = 14;
+  TIMEZONE_ASIA_KOLKATA = 15;
+  TIMEZONE_ASIA_SHANGHAI = 16;
+  TIMEZONE_ASIA_SEOUL = 17;
+  TIMEZONE_ASIA_JAKARTA = 18;
+  TIMEZONE_ASIA_BANGKOK = 19;
+  TIMEZONE_ASIA_DUBAI = 20;
+  TIMEZONE_ASIA_RIYADH = 21;
+  TIMEZONE_ASIA_MANILA = 22;
+  TIMEZONE_ASIA_SINGAPORE = 23;
+  TIMEZONE_AUSTRALIA_SYDNEY = 24;
+  TIMEZONE_PACIFIC_HONOLULU = 25;
+  TIMEZONE_AMERICA_PHOENIX = 26;
+  TIMEZONE_AMERICA_TORONTO = 27;
+  TIMEZONE_AMERICA_MEXICO_CITY = 28;
+  TIMEZONE_AMERICA_ARGENTINA_BUENOS_AIRES = 29;
+  TIMEZONE_AFRICA_LAGOS = 30;
+  TIMEZONE_OTHER = 31;
+}
+
+enum DeviceNetworkType {
+  DEVICE_NETWORK_TYPE_UNKNOWN = 0;
+  DEVICE_NETWORK_TYPE_WIFI = 1;
+  DEVICE_NETWORK_TYPE_CELLULAR_5G = 2;
+  DEVICE_NETWORK_TYPE_CELLULAR_OTHER = 3;
+  DEVICE_NETWORK_TYPE_OTHER = 4;
+}
