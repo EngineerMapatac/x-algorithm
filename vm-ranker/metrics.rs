@@ -1,17 +1,18 @@
 use lazy_static::lazy_static;
 use prometheus::{
-    register_counter_vec, register_gauge, register_histogram_vec, register_int_counter,
-    register_int_counter_vec, register_int_gauge_vec, CounterVec, Gauge, Histogram, HistogramOpts,
-    HistogramVec, IntCounter, IntCounterVec, IntGaugeVec, Opts,
+    register_counter_vec, register_gauge, register_histogram, register_histogram_vec,
+    register_int_counter, register_int_counter_vec, register_int_gauge, register_int_gauge_vec,
+    CounterVec, Gauge, Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge,
+    IntGaugeVec, Opts,
 };
 
 lazy_static! {
     pub static ref VALUE_MODEL_REQUESTS: CounterVec = register_counter_vec!(
         Opts::new(
             "vm_ranker_value_model_requests_total",
-            "Rank requests by scoring mode (passthrough, value_model, fallback)"
+            "Rank requests by scoring mode and whether user debias was applied"
         ),
-        &["mode"]
+        &["mode", "debias"]
     )
     .unwrap();
     pub static ref VALUE_MODEL_FALLBACK: CounterVec = register_counter_vec!(
@@ -28,6 +29,45 @@ lazy_static! {
             "Value-model requests by whether heads were weighted (heads) or the caller supplied every candidate's weighted score and only per-request adjustments ran (cached_weighted)"
         ),
         &["stage"]
+    )
+    .unwrap();
+    pub static ref USER_DEBIAS_REQUESTS: IntCounterVec = register_int_counter_vec!(
+        Opts::new(
+            "vm_ranker_user_debias_requests_total",
+            "User-debias requests by outcome: applied with Phoenix scores from this request (fresh), from the post cache (cached) or without a scoring time (no_hint); skipped because of model_not_loaded, stale_artifact, no_sequence, invalid_params, sequence_error or feature_mismatch"
+        ),
+        &["path"]
+    )
+    .unwrap();
+    pub static ref USER_DEBIAS_PREDICT_DURATION: Histogram = register_histogram!(
+        HistogramOpts::new(
+            "vm_ranker_user_debias_predict_seconds",
+            "Sequence parse + featurize + predict latency in seconds"
+        )
+        .buckets(prometheus::exponential_buckets(0.0001, 1.5, 25).unwrap())
+    )
+    .unwrap();
+    pub static ref USER_DEBIAS_MODEL_LOADED: IntGauge = register_int_gauge!(
+        "vm_ranker_user_debias_model_loaded",
+        "1 when a user-debias model is loaded, else 0"
+    )
+    .unwrap();
+    pub static ref USER_DEBIAS_MODEL_TRAINED_AT_MS: IntGauge = register_int_gauge!(
+        "vm_ranker_user_debias_model_trained_at_ms",
+        "trained_at_ms of the loaded user-debias model"
+    )
+    .unwrap();
+    pub static ref USER_DEBIAS_MODEL_TRAIN_RECORDS: IntGauge = register_int_gauge!(
+        "vm_ranker_user_debias_model_train_records",
+        "train_records of the loaded user-debias model"
+    )
+    .unwrap();
+    pub static ref USER_DEBIAS_MODEL_RELOADS: CounterVec = register_counter_vec!(
+        Opts::new(
+            "vm_ranker_user_debias_model_reloads_total",
+            "User-debias model reload attempts by outcome"
+        ),
+        &["outcome"]
     )
     .unwrap();
     pub static ref SCORE_REQUESTS: CounterVec = register_counter_vec!(

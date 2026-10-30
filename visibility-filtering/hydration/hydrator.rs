@@ -1,10 +1,13 @@
 use crate::clients::socialgraph_client::{EdgeDirection, Graph};
-use crate::hydration::inventory::{MissPolicy, Source, Subject};
-use crate::hydration::sources::Scope;
-use std::fmt;
+use crate::hydration::fetcher::{FetcherId, Owner};
+use crate::hydration::inventory::{Source, Stake, Tier};
+use crate::hydration::relation::{Fetch, Relation};
+use crate::hydration::store::{ControlArms, KeyOrigin, Names};
+use crate::rules::Expansion;
 use strum::VariantArray;
-use xai_core_entities::entities::ConversationControlArm;
 use xai_core_entities::gizmoduck_client::QueryFields;
+
+const ACTORS: (&str, &str) = ("gizmoduck", "actor_profile");
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr, strum::VariantArray)]
 #[strum(serialize_all = "snake_case")]
@@ -28,6 +31,7 @@ pub enum Hydrator {
     RootFollowsViewer,
     RootFollowsViewerSecondDegree,
     SuperFollowsRoot,
+    ViewerFollowsRoot,
     BlockedByConversationRoot,
     ConversationRootPost,
     BlockedByConversationRootPost,
@@ -40,10 +44,28 @@ pub enum Hydrator {
     ArticleCoverMedia,
     TrustedFriends,
     OutsideNarrowcastPlace,
+    QuotedTweet,
+    AuthorBlocksOuterAuthor,
+    OuterAuthorFollowsAuthor,
+    ReactedToPostSafetyLabels,
+    ReactedToAuthorSafety,
+    ViewerNotificationFilters,
+    AuthorProfile,
+    AuthorFollowsViewer,
+    AuthorConfirmedEmail,
+    AuthorVerifiedPhone,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum RequestRows {
+    #[default]
+    Posts,
+    Users,
+    ActorPosts,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub struct Hydrators(u32);
+pub struct Hydrators(u64);
 
 impl Hydrators {
     pub const fn empty() -> Self {
@@ -52,7 +74,7 @@ impl Hydrators {
 
     #[cfg(test)]
     pub fn all() -> Self {
-        Self(u32::MAX >> (u32::BITS as usize - <Hydrator as strum::VariantArray>::VARIANTS.len()))
+        Self(u64::MAX >> (u64::BITS as usize - <Hydrator as strum::VariantArray>::VARIANTS.len()))
     }
 
     pub const fn of(hydrator: Hydrator) -> Self {
@@ -127,38 +149,10 @@ impl Edge {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum KeyOrigin {
-    RequestTweets,
-    Viewer,
-    PureCoreAuthor,
-    PureCoreRetweeter,
-    PureCoreReplyRoot,
-    ExclusiveConversationAuthor,
-    TweetArticle,
-    ConversationRoot(&'static [ConversationControlArm]),
-    ConversationControlBlockAuthor,
-    ConversationRootToFetch,
-    ConversationRootPostAuthor,
-    ViewerForCoAllowedList,
-    MyNetworkRootNotFollowingViewer,
-    CommunityPost,
-    ModeratedCommunity,
-    TweetCommunity,
-    TrustedFriendsList,
-    NarrowcastPlace,
-}
-
-const COMMUNITY_OR_MY_NETWORK: &[ConversationControlArm] = &[
-    ConversationControlArm::Community,
-    ConversationControlArm::MyNetwork,
-];
-const SUBSCRIBERS: &[ConversationControlArm] = &[ConversationControlArm::Subscribers];
-
-pub(super) fn arm_starts_conversation_root_select(arm: ConversationControlArm) -> bool {
-    [COMMUNITY_OR_MY_NETWORK, SUBSCRIBERS]
-        .into_iter()
-        .any(|arms| arms.contains(&arm))
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct UserPair {
+    pub(crate) source: u64,
+    pub(crate) destination: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -167,59 +161,28 @@ pub(super) struct NodeSpec {
     pub(super) part: Part,
     pub(super) key: KeyOrigin,
     pub(super) label: (&'static str, &'static str),
+    pub(super) relation: Option<Relation>,
+    pub(super) declared: Stake,
 }
 
-impl KeyOrigin {
-    const fn input(self) -> Option<Hydrator> {
-        match self {
-            KeyOrigin::RequestTweets | KeyOrigin::Viewer => None,
-            KeyOrigin::PureCoreAuthor
-            | KeyOrigin::PureCoreRetweeter
-            | KeyOrigin::PureCoreReplyRoot
-            | KeyOrigin::ConversationRootToFetch => Some(Hydrator::PureCore),
-            KeyOrigin::ConversationRootPostAuthor => Some(Hydrator::ConversationRootPost),
-            KeyOrigin::ExclusiveConversationAuthor
-            | KeyOrigin::CommunityPost
-            | KeyOrigin::TweetCommunity
-            | KeyOrigin::TweetArticle
-            | KeyOrigin::TrustedFriendsList
-            | KeyOrigin::NarrowcastPlace => Some(Hydrator::Tweet),
-            KeyOrigin::ConversationRoot(_)
-            | KeyOrigin::ConversationControlBlockAuthor
-            | KeyOrigin::ViewerForCoAllowedList => Some(Hydrator::ConversationControl),
-            KeyOrigin::MyNetworkRootNotFollowingViewer => Some(Hydrator::RootFollowsViewer),
-            KeyOrigin::ModeratedCommunity => Some(Hydrator::CommunityModeration),
+impl NodeSpec {
+    pub(super) const fn stake(self) -> Stake {
+        let names_the_row = matches!(self.key.names(), Names::Post | Names::Author);
+        if self.source.decides_existence() && names_the_row {
+            Stake::Exists
+        } else {
+            self.declared
         }
     }
 
-    pub(super) fn reads(self) -> Hydrators {
-        let input = match self.input() {
-            Some(input) => Hydrators::of(input),
-            None => Hydrators::empty(),
+    pub(super) const fn fetcher(self) -> FetcherId {
+        let owner = match self.relation {
+            Some(relation) if relation.owns(self.source) => Owner::Related(relation),
+            Some(_) | None => Owner::Request,
         };
-        match self {
-            KeyOrigin::MyNetworkRootNotFollowingViewer | KeyOrigin::ConversationRootToFetch => {
-                input.with(Hydrator::ConversationControl)
-            }
-            KeyOrigin::CommunityPost | KeyOrigin::ConversationControlBlockAuthor => {
-                input.with(Hydrator::PureCore)
-            }
-            KeyOrigin::ConversationRootPostAuthor => input
-                .with(Hydrator::PureCore)
-                .with(Hydrator::ConversationControl),
-            KeyOrigin::RequestTweets
-            | KeyOrigin::Viewer
-            | KeyOrigin::PureCoreAuthor
-            | KeyOrigin::PureCoreRetweeter
-            | KeyOrigin::PureCoreReplyRoot
-            | KeyOrigin::ExclusiveConversationAuthor
-            | KeyOrigin::TweetArticle
-            | KeyOrigin::ConversationRoot(_)
-            | KeyOrigin::ViewerForCoAllowedList
-            | KeyOrigin::ModeratedCommunity
-            | KeyOrigin::TweetCommunity
-            | KeyOrigin::TrustedFriendsList
-            | KeyOrigin::NarrowcastPlace => input,
+        FetcherId {
+            source: self.source,
+            owner,
         }
     }
 }
@@ -229,45 +192,62 @@ impl Hydrator {
         use Hydrator as H;
         use KeyOrigin as K;
         use Source as S;
+        use Stake::{Absent, BestEffort, MustHave};
         const fn node(
             source: Source,
             part: Part,
             key: KeyOrigin,
             label: (&'static str, &'static str),
+            declared: Stake,
         ) -> NodeSpec {
             NodeSpec {
                 source,
                 part,
                 key,
                 label,
+                relation: None,
+                declared,
             }
         }
-        const RELATIONSHIPS: (&str, &str) = ("socialgraph", "batch_check_relationships");
-        const BLOCKED_BY: (&str, &str) = ("blocked_by", "batch_check_blocked_by");
+        const fn reads(relation: Relation, node: NodeSpec) -> NodeSpec {
+            NodeSpec {
+                relation: Some(relation),
+                ..node
+            }
+        }
+        const VIEWER_AUTHOR_EDGES: (&str, &str) = ("socialgraph", "viewer_author_edges");
+        const QUOTE_AUTHOR_EDGES: (&str, &str) = ("socialgraph", "quote_author_edges");
+        const CONVERSATION_ROOT_AUTHOR_EDGES: (&str, &str) =
+            ("socialgraph", "conversation_root_author_edges");
+        const REACTED_TO: Stake = Expansion::ReactedTo.spec().on_failure;
         match self {
             H::PureCore => node(
                 S::TesPureCoreData,
                 Part::Column,
                 K::RequestTweets,
-                ("tes", "get_tweet_core_datas"),
+                ("tes", "tweet_pure_core_data"),
+                MustHave,
             ),
             H::Tweet => node(
-                S::TesTweet,
+                S::TesTweetForVisibility,
                 Part::Column,
                 K::RequestTweets,
-                ("tes", "get_tweets"),
+                ("tes", "tweet_for_visibility"),
+                MustHave,
             ),
             H::ConversationControl => node(
                 S::TesConversationControl,
                 Part::Column,
                 K::RequestTweets,
-                ("conversation_control", "get_conversation_controls"),
+                ("tes", "tweet_conversation_control"),
+                BestEffort,
             ),
             H::TweetSafetyLabels => node(
                 S::SafetyLabels,
                 Part::Column,
                 K::RequestTweets,
-                ("safety_labels", "get"),
+                ("safety_labels", "tweet_safety_labels"),
+                MustHave,
             ),
             H::ViewerProfile => node(
                 S::GizmoduckViewer,
@@ -277,199 +257,366 @@ impl Hydrator {
                     QueryFields::SAFETY,
                 ]),
                 K::Viewer,
-                ("gizmoduck", "get_viewer_data"),
+                ("gizmoduck", "viewer_profile"),
+                MustHave,
             ),
             H::ViewerLabels => node(
                 S::GizmoduckViewer,
                 Part::Fields(&[QueryFields::LABELS]),
                 K::Viewer,
-                ("gizmoduck", "get_viewer_data"),
+                ("gizmoduck", "viewer_profile"),
+                MustHave,
             ),
             H::AuthorSafety => node(
                 S::GizmoduckAuthor,
                 Part::Fields(&[QueryFields::SAFETY]),
                 K::PureCoreAuthor,
-                ("gizmoduck", "get_users"),
+                ("gizmoduck", "author_profile"),
+                MustHave,
             ),
             H::AuthorLabels => node(
                 S::GizmoduckAuthor,
                 Part::Fields(&[QueryFields::LABELS]),
                 K::PureCoreAuthor,
-                ("gizmoduck", "get_users"),
+                ("gizmoduck", "author_profile"),
+                MustHave,
             ),
             H::Follows => node(
                 S::Flock,
                 Part::Edge(Edge::Follows),
                 K::PureCoreAuthor,
-                RELATIONSHIPS,
+                VIEWER_AUTHOR_EDGES,
+                BestEffort,
             ),
             H::Blocks => node(
                 S::Flock,
                 Part::Edge(Edge::Blocks),
                 K::PureCoreAuthor,
-                RELATIONSHIPS,
+                VIEWER_AUTHOR_EDGES,
+                MustHave,
             ),
             H::Mutes => node(
                 S::Flock,
                 Part::Edge(Edge::Mutes),
                 K::PureCoreAuthor,
-                RELATIONSHIPS,
+                VIEWER_AUTHOR_EDGES,
+                MustHave,
             ),
             H::MuteRetweets => node(
                 S::Flock,
                 Part::Edge(Edge::MuteRetweets),
                 K::PureCoreRetweeter,
-                RELATIONSHIPS,
+                VIEWER_AUTHOR_EDGES,
+                MustHave,
             ),
             H::BlockedByAuthor => node(
                 S::Flock,
                 Part::Edge(Edge::BlockedBy),
                 K::PureCoreAuthor,
-                BLOCKED_BY,
+                VIEWER_AUTHOR_EDGES,
+                BestEffort,
             ),
             H::BlockedByReplyRoot => node(
                 S::Flock,
                 Part::Edge(Edge::BlockedBy),
                 K::PureCoreReplyRoot,
-                BLOCKED_BY,
+                VIEWER_AUTHOR_EDGES,
+                BestEffort,
             ),
             H::SuperFollowsExclusive => node(
                 S::Flock,
                 Part::Edge(Edge::SuperFollows),
                 K::ExclusiveConversationAuthor,
-                ("exclusive_content", "batch_check_super_follows"),
+                ("socialgraph", "exclusive_super_follow"),
+                MustHave,
             ),
             H::RootFollowsViewer => node(
                 S::Flock,
                 Part::Edge(Edge::FollowedBy),
-                K::ConversationRoot(COMMUNITY_OR_MY_NETWORK),
-                ("conversation_control", "batch_check_followed_by"),
+                K::ControlRoot(ControlArms::CommunityOrMyNetwork),
+                CONVERSATION_ROOT_AUTHOR_EDGES,
+                BestEffort,
             ),
             H::RootFollowsViewerSecondDegree => node(
                 S::Wingman,
                 Part::Edge(Edge::SecondDegree),
                 K::MyNetworkRootNotFollowingViewer,
-                ("conversation_control", "exists_intersect"),
+                ("wingman", "conversation_root_author_second_degree"),
+                Absent(Tier::BestEffort),
             ),
             H::SuperFollowsRoot => node(
                 S::Flock,
                 Part::Edge(Edge::SuperFollows),
-                K::ConversationRoot(SUBSCRIBERS),
-                ("conversation_control", "batch_check_super_follows"),
+                K::ControlRoot(ControlArms::Subscribers),
+                CONVERSATION_ROOT_AUTHOR_EDGES,
+                BestEffort,
+            ),
+            H::ViewerFollowsRoot => node(
+                S::Flock,
+                Part::Edge(Edge::Follows),
+                K::ControlRoot(ControlArms::Followers),
+                CONVERSATION_ROOT_AUTHOR_EDGES,
+                BestEffort,
             ),
             H::BlockedByConversationRoot => node(
                 S::Flock,
                 Part::Edge(Edge::BlockedBy),
                 K::ConversationControlBlockAuthor,
-                ("conversation_control", "batch_check_blocked_by"),
+                CONVERSATION_ROOT_AUTHOR_EDGES,
+                BestEffort,
             ),
-            H::ConversationRootPost => node(
-                S::TesConversationRoot,
-                Part::Column,
-                K::ConversationRootToFetch,
-                ("conversation_root", "get_tweet_core_datas"),
+            H::ConversationRootPost => reads(
+                Relation::ConversationRoot,
+                node(
+                    S::TesPureCoreData,
+                    Part::Column,
+                    K::RelatedTweet,
+                    ("tes", "conversation_root_pure_core_data"),
+                    BestEffort,
+                ),
             ),
-            H::BlockedByConversationRootPost => node(
-                S::Flock,
-                Part::Edge(Edge::BlockedBy),
-                K::ConversationRootPostAuthor,
-                ("conversation_root", "batch_check_blocked_by"),
+            H::BlockedByConversationRootPost => reads(
+                Relation::ConversationRoot,
+                node(
+                    S::Flock,
+                    Part::Edge(Edge::BlockedBy),
+                    K::ConversationRootPostAuthor,
+                    ("socialgraph", "conversation_root_author_blocked_by"),
+                    BestEffort,
+                ),
             ),
             H::ViewerCountry => node(
                 S::ViewerCountry,
                 Part::Column,
                 K::ViewerForCoAllowedList,
-                ("conversation_control", "tfe_top_country"),
+                ("about_this_account", "viewer_country"),
+                BestEffort,
             ),
             H::CommunityModeration => node(
                 S::CommunityModeration,
                 Part::Column,
                 K::CommunityPost,
-                ("communities", "moderation_state"),
+                ("communities", "community_moderation"),
+                MustHave,
             ),
             H::CommunityModerator => node(
                 S::CommunityModerator,
                 Part::Column,
                 K::ModeratedCommunity,
-                ("communities", "visibility_features"),
+                ("communities", "community_moderator"),
+                MustHave,
             ),
             H::CommunityViewerRemoved => node(
                 S::CommunityViewerRemoved,
                 Part::Column,
                 K::TweetCommunity,
-                ("communities", "is_removed"),
+                ("communities", "community_viewer_removed"),
+                BestEffort,
             ),
             H::ArticleLifecycle => node(
                 S::ArticleLifecycle,
                 Part::Column,
                 K::TweetArticle,
-                ("article", "get_lifecycles"),
+                ("articles", "article_lifecycle"),
+                MustHave,
             ),
             H::ArticleMediaEntities => node(
                 S::ArticleMediaEntities,
                 Part::Column,
                 K::TweetArticle,
-                ("article", "get_media_entities"),
+                ("articles", "article_media_entities"),
+                Absent(Tier::MustHave),
             ),
             H::ArticleCoverMedia => node(
                 S::ArticleCoverMedia,
                 Part::Column,
                 K::TweetArticle,
-                ("article", "get_cover_media"),
+                ("articles", "article_cover_media"),
+                Absent(Tier::MustHave),
             ),
             H::TrustedFriends => node(
                 S::TrustedFriends,
                 Part::Edge(Edge::TrustedFriends),
                 K::TrustedFriendsList,
-                ("trusted_friends", "is_member_or_owner"),
+                ("trusted_friends", "trusted_friends_membership"),
+                Absent(Tier::MustHave),
             ),
             H::OutsideNarrowcastPlace => node(
                 S::UserLocation,
                 Part::Edge(Edge::OutsidePlace),
                 K::NarrowcastPlace,
-                ("geoduck", "user_location"),
+                ("geoduck", "viewer_location"),
+                BestEffort,
+            ),
+            H::AuthorBlocksOuterAuthor => reads(
+                Relation::QuoteOuter,
+                node(
+                    S::Flock,
+                    Part::Edge(Edge::Blocks),
+                    K::QuotedAuthorToQuotingAuthor,
+                    QUOTE_AUTHOR_EDGES,
+                    MustHave,
+                ),
+            ),
+            H::OuterAuthorFollowsAuthor => reads(
+                Relation::QuoteOuter,
+                node(
+                    S::Flock,
+                    Part::Edge(Edge::Follows),
+                    K::QuotingAuthorToProtectedQuotedAuthor,
+                    QUOTE_AUTHOR_EDGES,
+                    BestEffort,
+                ),
+            ),
+            H::QuotedTweet => node(
+                S::TesQuotedTweet,
+                Part::Column,
+                K::OuterOfMissingQuote,
+                ("tes", "quoted_tweet"),
+                BestEffort,
+            ),
+            H::ReactedToPostSafetyLabels => reads(
+                Relation::ReactedTo,
+                node(
+                    S::SafetyLabels,
+                    Part::Column,
+                    K::RelatedTweet,
+                    ("safety_labels", "reacted_to_safety_labels"),
+                    REACTED_TO,
+                ),
+            ),
+            H::ReactedToAuthorSafety => reads(
+                Relation::ReactedTo,
+                node(
+                    S::GizmoduckAuthor,
+                    Part::Fields(&[QueryFields::SAFETY]),
+                    K::RelatedAuthor,
+                    ("gizmoduck", "reacted_to_author_profile"),
+                    REACTED_TO,
+                ),
+            ),
+            H::ViewerNotificationFilters => node(
+                S::GizmoduckViewer,
+                Part::Fields(&[QueryFields::MUTE_SETTINGS]),
+                K::Viewer,
+                ("gizmoduck", "viewer_profile"),
+                MustHave,
+            ),
+            H::AuthorProfile => node(
+                S::GizmoduckActor,
+                Part::Fields(&[QueryFields::PROFILE]),
+                K::RequestUsers,
+                ACTORS,
+                MustHave,
+            ),
+            H::AuthorFollowsViewer => node(
+                S::Flock,
+                Part::Edge(Edge::FollowedBy),
+                K::PureCoreAuthor,
+                VIEWER_AUTHOR_EDGES,
+                MustHave,
+            ),
+            H::AuthorConfirmedEmail => node(
+                S::ActorEmails,
+                Part::Column,
+                K::UserIfViewerFiltersNoConfirmedEmail,
+                ("notifinfra", "actor_emails"),
+                MustHave,
+            ),
+            H::AuthorVerifiedPhone => node(
+                S::ActorPhones,
+                Part::Column,
+                K::UserIfViewerFiltersNoConfirmedPhone,
+                ("notifinfra", "actor_phones"),
+                MustHave,
             ),
         }
     }
 
-    pub(crate) const fn is_best_effort(self) -> bool {
-        use Hydrator as H;
-        match self {
-            H::ConversationControl
-            | H::ConversationRootPost
-            | H::Follows
-            | H::BlockedByAuthor
-            | H::BlockedByReplyRoot
-            | H::BlockedByConversationRoot
-            | H::BlockedByConversationRootPost
-            | H::RootFollowsViewer
-            | H::RootFollowsViewerSecondDegree
-            | H::SuperFollowsRoot
-            | H::ViewerCountry
-            | H::CommunityViewerRemoved
-            | H::OutsideNarrowcastPlace => true,
-            H::PureCore
-            | H::Tweet
-            | H::TweetSafetyLabels
-            | H::ViewerProfile
-            | H::ViewerLabels
-            | H::AuthorSafety
-            | H::AuthorLabels
-            | H::Blocks
-            | H::Mutes
-            | H::MuteRetweets
-            | H::SuperFollowsExclusive
-            | H::CommunityModeration
-            | H::CommunityModerator
-            | H::ArticleLifecycle
-            | H::ArticleMediaEntities
-            | H::ArticleCoverMedia
-            | H::TrustedFriends => false,
+    pub(super) const fn spec_at(self, rows: RequestRows) -> NodeSpec {
+        let spec = self.spec();
+        match (rows, spec.fetcher()) {
+            (
+                RequestRows::Users,
+                FetcherId {
+                    source: Source::GizmoduckAuthor,
+                    owner: Owner::Request,
+                },
+            ) => NodeSpec {
+                source: Source::GizmoduckActor,
+                key: KeyOrigin::RequestUsers,
+                label: ACTORS,
+                ..spec
+            },
+            (
+                RequestRows::ActorPosts,
+                FetcherId {
+                    source: Source::GizmoduckAuthor,
+                    owner: Owner::Request,
+                },
+            ) => NodeSpec {
+                source: Source::GizmoduckActor,
+                key: KeyOrigin::PureCoreAuthor,
+                label: ACTORS,
+                ..spec
+            },
+            (RequestRows::Posts | RequestRows::Users | RequestRows::ActorPosts, _) => NodeSpec {
+                key: spec.key.at(rows),
+                ..spec
+            },
         }
     }
 
+    #[cfg(test)]
+    pub(crate) const fn declared_stake(self) -> Stake {
+        self.spec().declared
+    }
+
+    pub(crate) const fn is_best_effort(self) -> bool {
+        matches!(self.spec().declared.tier(), Tier::BestEffort)
+    }
+
     pub(super) const fn input(self) -> Option<Hydrator> {
-        self.spec().key.input()
+        self.input_at(RequestRows::Posts)
+    }
+
+    pub(crate) const fn relation(self) -> Option<Relation> {
+        self.spec().relation
+    }
+
+    pub(super) const fn key_at(self, rows: RequestRows) -> KeyOrigin {
+        self.spec_at(rows).key
+    }
+
+    pub(super) const fn input_at(self, rows: RequestRows) -> Option<Hydrator> {
+        let input = self.key_at(rows).input();
+        match (input, self.spec().relation) {
+            (None, Some(relation)) => relation.spec().trigger.input(),
+            _ => input,
+        }
+    }
+
+    pub(super) const fn precedes_author(self, rows: RequestRows) -> bool {
+        matches!(self.input_at(rows), None | Some(Hydrator::Tweet))
+    }
+
+    pub(super) const fn reads_at(self, rows: RequestRows) -> Hydrators {
+        let reads = self.key_at(rows).reads();
+        match self.spec().relation {
+            Some(relation) => reads.union(relation.spec().trigger.reads()),
+            None => reads,
+        }
+    }
+
+    const fn closed_over_at(self, rows: RequestRows) -> Hydrators {
+        let inputs = match self.input_at(rows) {
+            Some(input) => Hydrators::of(input),
+            None => Hydrators::empty(),
+        };
+        match self.spec().relation {
+            Some(_) => inputs.union(self.reads_at(rows)),
+            None => inputs,
+        }
     }
 
     pub(super) const fn edge(self) -> Option<Edge> {
@@ -479,20 +626,25 @@ impl Hydrator {
         }
     }
 
-    pub(crate) const fn is_edge(self) -> bool {
+    pub(super) const fn is_quote_pair_edge(self) -> bool {
+        self.is_edge() && self.spec().key.is_quote_pair()
+    }
+
+    pub(crate) const fn is_viewer_edge(self) -> bool {
+        self.is_edge() && !self.spec().key.is_quote_pair()
+    }
+
+    pub(super) const fn is_edge(self) -> bool {
         self.edge().is_some()
     }
 
     pub(crate) const fn needs_viewer(self) -> bool {
-        self.is_edge()
-            || matches!(
-                self.spec().key,
-                KeyOrigin::Viewer
-                    | KeyOrigin::ConversationRootToFetch
-                    | KeyOrigin::ViewerForCoAllowedList
-                    | KeyOrigin::ModeratedCommunity
-                    | KeyOrigin::TweetCommunity
-            )
+        let spec = self.spec();
+        let joins_for_viewer = match spec.relation {
+            Some(relation) => relation.spec().trigger.needs_viewer(),
+            None => false,
+        };
+        self.is_viewer_edge() || spec.key.needs_viewer() || joins_for_viewer
     }
 }
 
@@ -509,6 +661,11 @@ const MUST_HAVE: Hydrators = {
 };
 
 impl Hydrators {
+    pub(crate) const BLOCKED_BY_CONVERSATION_ROOT_AUTHOR: Self =
+        Self::of(Hydrator::BlockedByReplyRoot)
+            .with(Hydrator::BlockedByConversationRoot)
+            .with(Hydrator::BlockedByConversationRootPost);
+
     pub(crate) const fn must_have(self) -> Self {
         self.intersection(MUST_HAVE)
     }
@@ -521,10 +678,16 @@ impl Hydrators {
 const fn inputs_precede_nodes() -> bool {
     let mut rest = Hydrator::VARIANTS;
     while let [node, tail @ ..] = rest {
-        if let Some(input) = node.input()
-            && input as u8 >= *node as u8
-        {
-            return false;
+        let inputs = node
+            .closed_over_at(RequestRows::Posts)
+            .union(node.closed_over_at(RequestRows::Users))
+            .union(node.closed_over_at(RequestRows::ActorPosts));
+        let mut others = Hydrator::VARIANTS;
+        while let [other, others_tail @ ..] = others {
+            if inputs.contains(*other) && *other as u8 >= *node as u8 {
+                return false;
+            }
+            others = others_tail;
         }
         rest = tail;
     }
@@ -545,18 +708,15 @@ const fn best_effort_inputs_key_only_best_effort_nodes() -> bool {
     true
 }
 
-const fn miss_policies_fit_their_nodes() -> bool {
+const fn owning_relations_read_owned_sources() -> bool {
     let mut rest = Hydrator::VARIANTS;
     while let [node, tail @ ..] = rest {
         let spec = node.spec();
-        let fits = match spec.source.miss_policy() {
-            MissPolicy::Unresolves(Subject::Tweet) => matches!(spec.key, KeyOrigin::RequestTweets),
-            MissPolicy::Unresolves(Subject::Author) => {
-                matches!(spec.key, KeyOrigin::PureCoreAuthor)
+        let fits = match spec.relation {
+            Some(relation) if matches!(relation.spec().fetch, Fetch::Own(_)) => {
+                relation.owns(spec.source) || matches!(spec.part, Part::Edge(_))
             }
-            MissPolicy::FailsNode => true,
-            MissPolicy::ReadsNoEdge => node.is_edge(),
-            MissPolicy::ReadsNotFound => !node.is_edge(),
+            Some(_) | None => true,
         };
         if !fits {
             return false;
@@ -566,16 +726,32 @@ const fn miss_policies_fit_their_nodes() -> bool {
     true
 }
 
-const fn viewer_scopes_fit_their_nodes() -> bool {
+const fn stakes_fit_their_nodes() -> bool {
     let mut rest = Hydrator::VARIANTS;
     while let [node, tail @ ..] = rest {
-        let is_viewer_scope = matches!(node.spec().source.scope(), Scope::Viewer);
-        let fits = if matches!(node, Hydrator::ConversationRootPost) {
-            node.needs_viewer() && !is_viewer_scope
-        } else {
-            node.needs_viewer() == is_viewer_scope
-        };
+        let spec = node.spec();
+        let derives_exists = matches!(spec.stake(), Stake::Exists)
+            || matches!(node.spec_at(RequestRows::Users).stake(), Stake::Exists)
+            || matches!(node.spec_at(RequestRows::ActorPosts).stake(), Stake::Exists);
+        let fits = !matches!(spec.declared, Stake::Exists)
+            && (!derives_exists || matches!(spec.declared, Stake::MustHave))
+            && (spec.relation.is_none() || !derives_exists);
         if !fits {
+            return false;
+        }
+        rest = tail;
+    }
+    true
+}
+
+const fn quote_pair_edges_are_the_quote_outers_edges() -> bool {
+    let mut rest = Hydrator::VARIANTS;
+    while let [node, tail @ ..] = rest {
+        let quote_outer_owns = matches!(
+            node.spec().fetcher().owner,
+            Owner::Related(Relation::QuoteOuter)
+        );
+        if node.is_edge() && quote_outer_owns != node.is_quote_pair_edge() {
             return false;
         }
         rest = tail;
@@ -584,20 +760,22 @@ const fn viewer_scopes_fit_their_nodes() -> bool {
 }
 
 const _: () = assert!(inputs_precede_nodes());
+const _: () = assert!(quote_pair_edges_are_the_quote_outers_edges());
+const _: () = assert!(stakes_fit_their_nodes());
 const _: () = assert!(best_effort_inputs_key_only_best_effort_nodes());
-const _: () = assert!(miss_policies_fit_their_nodes());
-const _: () = assert!(viewer_scopes_fit_their_nodes());
-const _: () = assert!(Hydrator::VARIANTS.len() <= u32::BITS as usize);
+const _: () = assert!(owning_relations_read_owned_sources());
+const _: () = assert!(Hydrator::VARIANTS.len() <= u64::BITS as usize);
 
 impl Hydrators {
-    pub const fn closed(self) -> Self {
-        let mut closed = self.with(Hydrator::PureCore);
+    pub(crate) const fn closed(self, rows: RequestRows) -> Self {
+        let mut closed = match rows {
+            RequestRows::Posts | RequestRows::ActorPosts => self.with(Hydrator::PureCore),
+            RequestRows::Users => self,
+        };
         let mut rest = Hydrator::VARIANTS;
         while let [head @ .., node] = rest {
-            if let Some(input) = node.input()
-                && closed.contains(*node)
-            {
-                closed = closed.with(input);
+            if closed.contains(*node) {
+                closed = closed.union(node.closed_over_at(rows));
             }
             rest = head;
         }
@@ -609,35 +787,5 @@ impl Hydrators {
             .iter()
             .copied()
             .filter(move |&node| self.contains(node))
-    }
-}
-
-impl fmt::Display for KeyOrigin {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            KeyOrigin::RequestTweets => f.write_str("tweets"),
-            KeyOrigin::Viewer => f.write_str("viewer"),
-            KeyOrigin::PureCoreAuthor => f.write_str("author"),
-            KeyOrigin::PureCoreRetweeter => f.write_str("retweeter"),
-            KeyOrigin::PureCoreReplyRoot => f.write_str("reply_root"),
-            KeyOrigin::ExclusiveConversationAuthor => f.write_str("exclusive_author"),
-            KeyOrigin::TweetArticle => f.write_str("article"),
-            KeyOrigin::ConversationRoot(arms) => {
-                let arms: Vec<String> = arms.iter().map(|arm| format!("{arm:?}")).collect();
-                write!(f, "root:{}", arms.join("|"))
-            }
-            KeyOrigin::ConversationControlBlockAuthor => f.write_str("control_root_author"),
-            KeyOrigin::ConversationRootToFetch => f.write_str("conversation_root_to_fetch"),
-            KeyOrigin::ConversationRootPostAuthor => f.write_str("conversation_root_post_author"),
-            KeyOrigin::ViewerForCoAllowedList => f.write_str("viewer:co_allowed_list"),
-            KeyOrigin::MyNetworkRootNotFollowingViewer => {
-                f.write_str("root:MyNetwork:not_followed")
-            }
-            KeyOrigin::CommunityPost => f.write_str("community_post"),
-            KeyOrigin::ModeratedCommunity => f.write_str("moderated_community"),
-            KeyOrigin::TweetCommunity => f.write_str("tweet_community"),
-            KeyOrigin::TrustedFriendsList => f.write_str("trusted_friends_list"),
-            KeyOrigin::NarrowcastPlace => f.write_str("narrowcast_place"),
-        }
     }
 }

@@ -95,6 +95,7 @@ message UserContext {
   bool is_nsfw_user = 18;
   bool is_nsfw_mode = 19;
   bytes id_list_features_ipc = 20;
+  RecentSearchQueries recent_search_queries = 21;
 }
 
 message EngagementCountRow {
@@ -185,6 +186,8 @@ message PredictNextActionsRequest {
 
   FeedRequestContext feed_request_context = 25;
   FeedCursorDirection feed_cursor_direction = 26;
+
+  bool hydrate_history_url_embeddings = 27;
 }
 
 message PurchaseValueBaseline {
@@ -206,6 +209,8 @@ message PageDecodeParams {
   float temperature = 3;
 
   RankingScoreWeights rankingScoreWeights = 4;
+
+  optional float diversityWeight = 5;
 }
 
 message RankingScoreWeights {
@@ -294,6 +299,8 @@ message RetrieveTopKCandidatesRequest {
   repeated ExcludedPostsBloomFilter excluded_posts_bloom_filters = 15;
 
   repeated uint64 excluded_post_ids = 16;
+
+  map<string, float> value_model_weights = 17;
 }
 
 message ExcludedPostsBloomFilter {
@@ -350,6 +357,8 @@ message CandidateSet {
   repeated float searchQueryEmbedding = 4;
 
   DeviceFeature deviceFeature = 5;
+
+  optional int64 requestTimestampMs = 6;
 }
 
 message CandidateDistributionSet {
@@ -386,6 +395,8 @@ enum RetrievalDatasetType {
   RETRIEVAL_DATASET_TYPE_HOME_COLD = 13;
   RETRIEVAL_DATASET_TYPE_HOME_HOT = 14;
   RETRIEVAL_DATASET_TYPE_ZERO_FAV = 16;
+  reserved 17, 18;
+  RETRIEVAL_DATASET_TYPE_IMMERSIVE_32FAV_VIDEO_14_TO_30_DAY = 19;
 }
 
 message ScoredCandidate {
@@ -474,7 +485,7 @@ enum ActionName {
   CLIENT_TWEET_TRANSLATE_CLICK = 41;
   CLIENT_TWEET_NOT_RELEVANT = 42;
   CLIENT_TWEET_UNDO_NOT_RELEVANT = 43;
-  SERVER_TWEET_REACT_WITH_VIDEO = 44;
+  SERVER_TWEET_POST_VIDEO = 44;
   CLIENT_TWEET_SHOW_MORE_EXPAND = 45;
   CLIENT_TWEET_CLICK_GROK_ANALYZE = 46;
   CLIENT_TWEET_VIDEO_OPEN = 47;
@@ -541,6 +552,7 @@ enum ActionName {
   LLM_JUDGE_RELEVANT_TO_SEARCH = 108;
   LLM_JUDGE_NOT_RELEVANT_TO_SEARCH = 109;
   CLIENT_NOTIFICATION_SETTING_OPT_OUT = 110;
+  CLIENT_TWEET_VIDEO_SESSION = 111;
 
   ADS_WEB_CONVERSION = 128;
   ADS_VIDEO_VIEW = 129;
@@ -610,6 +622,7 @@ enum ActionName {
   P_LONG_DWELL_AND_PIXEL_FIRE = 193;
   ADS_ATTRIBUTED_MACT_MMP_CLICK_INSTALL = 194;
   ADS_ATTRIBUTED_MACT_MMP_VIEW_INSTALL = 195;
+  ADS_LEADGEN_CONVERSION = 196;
   ADS_PURCHASE_CONVERSION = 200;
   ADS_MID_FUNNEL_CONVERSION = 201;
   ADS_ADD_TO_CART_CONVERSION = 202;
@@ -1432,11 +1445,25 @@ message TweetInfo {
   ContentFeatures quotedContentFeatures = 37;
   SearchLexicalMatch searchLexicalMatch = 38;
   PostEngagerFeatures postEngagers = 39;
+  uint64 notInterestedCount = 40;
+  uint64 notificationSentCount = 41;
+  uint64 notificationOpenCount = 42;
+  uint64 notificationClickCount = 43;
+  uint64 notificationDismissCount = 44;
+  uint64 notificationSeeLessOftenCount = 45;
+  SearchAuthorMatch searchAuthorMatch = 46;
+  bool hasVideo = 47;
+  bool hasImage = 48;
 }
 
 message SearchLexicalMatch {
   float matchedWordFraction = 1;
   bool exactPhrase = 2;
+}
+
+message SearchAuthorMatch {
+  bool authorHandleExact = 1;
+  float authorNameOverlap = 2;
 }
 
 message PostEngagerFeatures {
@@ -1466,6 +1493,7 @@ message ScoreInfo {
   optional double pageDecodeSlotProb = 7;
   repeated uint32 predictionHeads = 8;
   repeated float predictionValues = 9;
+  optional bool pageDecoded = 10;
 }
 
 message SlateContext {
@@ -1680,6 +1708,17 @@ message AdInfo {
   EngagementCounts viewer_advertiser_conversion_counts = 25;
 
   repeated int64 post_video_media_ids = 26;
+
+  string url_domain = 27;
+
+  AdTargeting targeting = 28;
+}
+
+message AdTargeting {
+  repeated int64 interest_category_ids = 1;
+  repeated LanguageCode languages = 2;
+  optional Gender gender = 3;
+  repeated int32 os_types = 4;
 }
 
 message UserAdActionMeta {
@@ -1901,8 +1940,8 @@ enum UserActionAggregationType {
   ADS_WITH_KV_AD_HISTORY = 28;
   IMMERSIVE_LONG_DWELL = 29;
   DENSE_WITH_LONG_DWELL_HOME_EXCURSION = 30;
-  PLACEHOLDER_31 = 31;
-  PLACEHOLDER_32 = 32;
+  IMMERSIVE_LONG_DWELL_CREATED_POSTS = 31;
+  DENSE_WITH_LONG_DWELL_FAIR_VIEW = 32;
 }
 
 message UserActionAggregationResponse {

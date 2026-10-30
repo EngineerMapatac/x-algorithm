@@ -6,18 +6,28 @@ use xai_recsys_proto::{ContentFeatures, ProductSurface};
 use xai_vm_ranker_proto as pb;
 use xai_vm_ranker_proto::experiment::{CandidatePayload, RequestPayload};
 
-pub(crate) fn request_payload(query: &ScoredPostsQuery, candidates: &[PostCandidate]) -> Vec<u8> {
-    RequestPayload {
-        engine_time_hint_ms: phoenix_scored_at_ms(candidates),
-        user_sequence_arrow_ipc: query.columnar_scoring_sequence.clone().unwrap_or_default(),
-        product_surface: if query.in_network_only {
+pub(crate) fn request_payload(
+    query: &ScoredPostsQuery,
+    candidates: &[PostCandidate],
+    debias: bool,
+    history_topics: bool,
+) -> Vec<u8> {
+    let mut payload = RequestPayload::default();
+    if debias {
+        payload.engine_time_hint_ms = phoenix_scored_at_ms(candidates);
+        payload.user_sequence_arrow_ipc =
+            query.columnar_scoring_sequence.clone().unwrap_or_default();
+        payload.product_surface = if query.in_network_only {
             ProductSurface::HomeTimelineRankedFollowing
         } else {
             ProductSurface::HomeTimelineRanking
-        } as i32,
-        client_app_id: i64::from(query.client_app_id),
+        } as i32;
+        payload.client_app_id = i64::from(query.client_app_id);
     }
-    .encode_to_vec()
+    if history_topics {
+        payload.history_topics = query.history_topics.clone();
+    }
+    payload.encode_to_vec()
 }
 
 pub(crate) fn candidate_payload(candidate: &PostCandidate, debias: bool, pacing: bool) -> Vec<u8> {

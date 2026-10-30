@@ -1,20 +1,23 @@
-use super::builders::tweet_candidate;
-use super::{Role, Row};
+use super::{Role, Row, Subject};
 use crate::models::{
-    AuthorFeatures, ClientCapability, LimitedEngagementReason, PostCandidate, TweetFeatures,
-    ViewerFeatures,
+    AuthorFeatures, ClientCapability, ClientSwitch, LimitedEngagementReason, PostCandidate,
+    TweetFeatures, ViewerFeatures,
 };
-use crate::rules::fixtures::{allow, candidate, dropped, limited, viewer, VIEWER_ID};
-use crate::rules::SafetyLevel::{TimelineHome, TimelineHomeHydration};
+use crate::rules::fixtures::{
+    allow, candidate, dropped, limited, tweet_candidate, viewer, VIEWER_ID,
+};
+use crate::rules::SafetyLevel::{
+    ImmersiveExpandedRecommendations, TimelineHome, TimelineHomeHydration,
+    TimelineHomeRecommendations,
+};
 use std::num::NonZeroU64;
-use xai_core_entities::entities::{EditControl, EditControlInitial};
 use xai_visibility_filtering::models::FilteredReason;
 
 pub(super) fn rows() -> Vec<Row> {
     vec![
         Row {
             name: "nullcast",
-            post: tweet_candidate(|t| t.is_nullcast = true),
+            subject: Subject::Post(tweet_candidate(|t| t.is_nullcast = true)),
             expect: vec![
                 (
                     TimelineHome,
@@ -26,11 +29,16 @@ pub(super) fn rows() -> Vec<Row> {
                     Role::Author,
                     dropped(FilteredReason::TweetIsNullcast, "nullcasted_tweet/drop"),
                 ),
+                (
+                    TimelineHomeRecommendations,
+                    Role::NonFollower,
+                    dropped(FilteredReason::TweetIsNullcast, "nullcasted_tweet/drop"),
+                ),
             ],
         },
         Row {
             name: "nullcast_retweet",
-            post: {
+            subject: Subject::Post({
                 let features = TweetFeatures {
                     is_nullcast: true,
                     ..Default::default()
@@ -39,29 +47,31 @@ pub(super) fn rows() -> Vec<Row> {
                     .with_tweet_features(features)
                     .retweet_of(2)
                     .build()
-            },
-            expect: vec![(TimelineHome, Role::NonFollower, allow())],
-        },
-        Row {
-            name: "nullcast_community",
-            post: tweet_candidate(|t| {
-                t.is_nullcast = true;
-                t.community_id = NonZeroU64::new(500);
             }),
             expect: vec![(TimelineHome, Role::NonFollower, allow())],
         },
         Row {
+            name: "nullcast_community",
+            subject: Subject::Post(tweet_candidate(|t| {
+                t.is_nullcast = true;
+                t.community_id = NonZeroU64::new(500);
+            })),
+            expect: vec![(TimelineHome, Role::NonFollower, allow())],
+        },
+        Row {
             name: "protected_author_community_post",
-            post: candidate()
-                .with_author_features(AuthorFeatures {
-                    is_protected: true,
-                    ..Default::default()
-                })
-                .with_tweet_features(TweetFeatures {
-                    community_id: NonZeroU64::new(500),
-                    ..Default::default()
-                })
-                .build(),
+            subject: Subject::Post(
+                candidate()
+                    .with_author_features(AuthorFeatures {
+                        is_protected: true,
+                        ..Default::default()
+                    })
+                    .with_tweet_features(TweetFeatures {
+                        community_id: NonZeroU64::new(500),
+                        ..Default::default()
+                    })
+                    .build(),
+            ),
             expect: vec![
                 (
                     TimelineHomeHydration,
@@ -81,7 +91,7 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "stale_edit",
-            post: stale_candidate(),
+            subject: Subject::Post(stale_candidate()),
             expect: vec![
                 (
                     TimelineHome,
@@ -90,6 +100,11 @@ pub(super) fn rows() -> Vec<Row> {
                         FilteredReason::UnspecifiedReason,
                         "stale_tweet/drop/unspecified",
                     ),
+                ),
+                (
+                    TimelineHome,
+                    Role::RetweetSource(Box::new(Role::NonFollower)),
+                    allow(),
                 ),
                 (
                     TimelineHomeHydration,
@@ -112,44 +127,48 @@ pub(super) fn rows() -> Vec<Row> {
                     Role::As(
                         "client_without_stale_tweet_limits",
                         ViewerFeatures {
-                            client_capability: ClientCapability {
-                                stale_tweet_limits: false,
-                                ..ClientCapability::default()
-                            },
+                            client_capability: ClientCapability::DEFAULT
+                                .without(ClientSwitch::StaleTweetLimits),
                             ..viewer(VIEWER_ID)
                         },
                     ),
                     allow(),
                 ),
+                (
+                    TimelineHomeRecommendations,
+                    Role::NonFollower,
+                    dropped(
+                        FilteredReason::UnspecifiedReason,
+                        "stale_tweet/drop/unspecified",
+                    ),
+                ),
+                (
+                    ImmersiveExpandedRecommendations,
+                    Role::NonFollower,
+                    dropped(
+                        FilteredReason::UnspecifiedReason,
+                        "stale_tweet/drop/unspecified",
+                    ),
+                ),
             ],
         },
         Row {
             name: "stale_edit_retweet",
-            post: {
+            subject: Subject::Post({
                 let mut retweet = stale_candidate();
                 retweet.post.source_tweet_id = Some(2);
                 retweet
-            },
+            }),
             expect: vec![(TimelineHome, Role::NonFollower, allow())],
         },
         Row {
             name: "current_edit",
-            post: tweet_candidate(|t| {
-                t.edit_control = Some(EditControl::Initial(EditControlInitial {
-                    edit_tweet_ids: vec![1],
-                    ..Default::default()
-                }))
-            }),
+            subject: Subject::Post(tweet_candidate(|t| t.latest_edit_tweet_id = Some(1))),
             expect: vec![(TimelineHome, Role::NonFollower, allow())],
         },
     ]
 }
 
 fn stale_candidate() -> PostCandidate {
-    tweet_candidate(|t| {
-        t.edit_control = Some(EditControl::Initial(EditControlInitial {
-            edit_tweet_ids: vec![1, 2],
-            ..Default::default()
-        }))
-    })
+    tweet_candidate(|t| t.latest_edit_tweet_id = Some(2))
 }

@@ -4,14 +4,6 @@ use x509_parser::parse_x509_certificate;
 
 const S2S_IDENTITY_PREFIX: &str = "twtr:svc:";
 
-#[derive(Clone, Copy, strum::IntoStaticStr)]
-#[strum(serialize_all = "snake_case")]
-pub(crate) enum Endpoint {
-    FilterTweets,
-    EvaluateTweets,
-    GetSafetyLabels,
-}
-
 pub(crate) fn identity<T>(request: &Request<T>) -> Option<String> {
     request
         .peer_certs()

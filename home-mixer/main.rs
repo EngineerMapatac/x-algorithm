@@ -64,7 +64,7 @@ struct Args {
 
     #[arg(long, default_value = "penalized_peak_ewma")]
     phoenix_xds_lb_policy: String,
-    #[arg(long, default_value = "tonic")]
+    #[arg(long, default_value = "penalized_peak_ewma")]
     phoenix_xds_retrieval_lb_policy: String,
     #[arg(long, default_value_t = 500)]
     phoenix_xds_lb_default_rtt_ms: u64,

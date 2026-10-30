@@ -190,14 +190,6 @@ lazy_static! {
             .unwrap();
 
 
-                                                                                    pub static ref GENERIC_ACTION_TOTAL: IntCounterVec =
-        register_int_counter_vec!(
-            "abuse_enforcement_generic_action_total",
-            "Requested actions handled by the generic executor, by entity_type, kind, result, and fail-closed skip reason.",
-            &["entity_type", "kind", "result", "reason"])
-            .unwrap();
-
-
         pub static ref HTTP_LATENCY: HistogramVec =
         register_histogram_vec!(
             "abuse_enforcement_http_latency_seconds",
@@ -347,6 +339,14 @@ lazy_static! {
             &["result"])
             .unwrap();
 
+
+                                                pub static ref HEAD_GUARD_TOTAL: IntCounterVec =
+        register_int_counter_vec!(
+            "abuse_enforcement_head_guard_total",
+            "Head-guard events by head, scope, window and result.",
+            &["head", "scope", "window", "result"])
+            .unwrap();
+
             pub static ref ACTION_CONTROL_LOADED: IntGauge =
         register_int_gauge!(
             "abuse_enforcement_action_control_loaded",
@@ -384,6 +384,13 @@ lazy_static! {
             "abuse_enforcement_action_control_decisions_total",
             "Decisions an action-control record matched, by effective mode.",
             &["head", "mode", "forced"])
+            .unwrap();
+
+                pub static ref ACTION_CONTROL_ROLLOUT_TOTAL: IntCounterVec =
+        register_int_counter_vec!(
+            "abuse_enforcement_action_control_rollout_total",
+            "Decisions a live row's rollout placed, by head, row and side (inside, outside).",
+            &["head", "row", "side"])
             .unwrap();
 
             pub static ref ACTION_CONTROL_SAFETY_CHECKS_OK: IntGaugeVec =
@@ -461,7 +468,6 @@ pub fn init() {
     let _ = &*MANHATTAN_ERRORS_TOTAL;
     let _ = &*KAFKA_SELF_DELETE_TOTAL;
     let _ = &*RULES_YAML_COMPILED;
-    let _ = &*GENERIC_ACTION_TOTAL;
     let _ = &*HTTP_LATENCY;
     let _ = &*HTTP_INFLIGHT;
     let _ = &*KAFKA_PUBLISH_TOTAL;
@@ -481,8 +487,10 @@ pub fn init() {
     let _ = &*ACTION_CONTROL_REFRESH_TOTAL;
     let _ = &*ACTION_CONTROL_UNREADABLE_TOTAL;
     let _ = &*ACTION_CONTROL_DECISIONS_TOTAL;
+    let _ = &*ACTION_CONTROL_ROLLOUT_TOTAL;
     let _ = &*ACTION_CONTROL_SAFETY_CHECKS_OK;
     let _ = &*ACTION_CONTROL_SEEN_TOTAL;
+    let _ = &*HEAD_GUARD_TOTAL;
 }
 
 #[cfg(test)]

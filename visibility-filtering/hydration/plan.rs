@@ -1,27 +1,30 @@
 use crate::clients::socialgraph_client::{EdgeDirection, Graph};
-use crate::hydration::hydrator::{Edge, Part};
-use crate::hydration::inventory::Source;
+use crate::hydration::fetcher::{AskedFields, FetcherId};
+use crate::hydration::hydrator::{Edge, Part, RequestRows};
+use crate::hydration::relation::{Relation, Role};
 use crate::hydration::{Hydrator, Hydrators, BEST_EFFORT_HYDRATION_TIMEOUT, HYDRATION_TIMEOUT};
-use crate::rules::SafetyLevel;
+use crate::rules::{Expansion, SafetyLevel};
 use std::fmt;
+use std::iter;
 use std::time::Duration;
 use strum::VariantArray;
 use xai_core_entities::gizmoduck_client::QueryFields;
 
 pub(crate) struct HydrationPlan {
     level: SafetyLevel,
+    rows: RequestRows,
     groups: Vec<Group>,
+    edge_ceilings: Vec<(FetcherId, Edge, Duration)>,
     nodes: Hydrators,
     logged_out_nodes: Hydrators,
 }
 
 pub(super) struct Group {
     pub(super) position: usize,
-    pub(super) source: Source,
+    pub(super) fetcher: FetcherId,
     pub(super) input: Option<Hydrator>,
     pub(super) nodes: Hydrators,
-    clients: Vec<&'static str>,
-    methods: Vec<&'static str>,
+    label: (&'static str, &'static str),
     edges: Vec<(Edge, Graph, EdgeDirection, Hydrators)>,
     fields: Vec<QueryFields>,
     readers: Vec<usize>,
@@ -29,32 +32,28 @@ pub(super) struct Group {
 
 impl HydrationPlan {
     pub(crate) fn new(level: SafetyLevel, hydrators: Hydrators) -> Self {
-        let nodes = hydrators.closed();
+        Self::with_rows(level, level.spec().rows(), hydrators)
+    }
+
+    pub(crate) fn with_rows(level: SafetyLevel, rows: RequestRows, hydrators: Hydrators) -> Self {
+        let nodes = hydrators.closed(rows);
         let mut groups: Vec<Group> = Vec::new();
         for node in nodes.iter() {
-            let spec = node.spec();
-            let (client, method) = spec.label;
-            let input = node.input();
+            let spec = node.spec_at(rows);
+            let input = node.input_at(rows);
             match groups
                 .iter_mut()
-                .find(|group| group.source == spec.source && group.input == input)
+                .find(|group| group.fetcher == spec.fetcher() && group.input == input)
             {
                 Some(group) => {
                     group.nodes = group.nodes.with(node);
-                    if !group.clients.contains(&client) {
-                        group.clients.push(client);
-                    }
-                    if !group.methods.contains(&method) {
-                        group.methods.push(method);
-                    }
                 }
                 None => groups.push(Group {
                     position: groups.len(),
-                    source: spec.source,
+                    fetcher: spec.fetcher(),
                     input,
                     nodes: Hydrators::of(node),
-                    clients: vec![client],
-                    methods: vec![method],
+                    label: spec.label,
                     edges: Vec::new(),
                     fields: Vec::new(),
                     readers: Vec::new(),
@@ -65,7 +64,7 @@ impl HydrationPlan {
             .iter()
             .map(|group| {
                 group.nodes.iter().fold(Hydrators::empty(), |reads, node| {
-                    reads.union(node.spec().key.reads())
+                    reads.union(node.reads_at(rows))
                 })
             })
             .collect();
@@ -80,14 +79,29 @@ impl HydrationPlan {
                     .collect()
             })
             .collect();
+        let mut edge_ceilings: Vec<(FetcherId, Edge, Duration)> = Vec::new();
+        for group in &groups {
+            for edge in group.nodes.iter().filter_map(Hydrator::edge) {
+                let ceiling = group.ceiling();
+                match edge_ceilings
+                    .iter_mut()
+                    .find(|(fetcher, read, _)| *fetcher == group.fetcher && *read == edge)
+                {
+                    Some((.., longest)) => *longest = (*longest).max(ceiling),
+                    None => edge_ceilings.push((group.fetcher, edge, ceiling)),
+                }
+            }
+        }
         for (group, readers) in groups.iter_mut().zip(readers) {
             group.edges = edges(group.nodes);
-            group.fields = fields(group.source, group.nodes);
+            group.fields = fields(group.fetcher, group.nodes, rows);
             group.readers = readers;
         }
         Self {
             level,
+            rows,
             groups,
+            edge_ceilings,
             nodes,
             logged_out_nodes: nodes
                 .iter()
@@ -98,6 +112,22 @@ impl HydrationPlan {
 
     pub(crate) fn level(&self) -> SafetyLevel {
         self.level
+    }
+
+    pub(crate) fn rows(&self) -> RequestRows {
+        self.rows
+    }
+
+    pub(crate) fn keys_only_user_rows_or_viewer(&self) -> bool {
+        self.nodes
+            .iter()
+            .all(|node| node.key_at(self.rows).keys_user_rows())
+    }
+
+    pub(crate) fn keys_a_node_only_user_rows_give(&self) -> bool {
+        self.nodes
+            .iter()
+            .any(|node| node.key_at(self.rows).keys_only_user_rows())
     }
 
     pub(super) fn reads_viewer_profile(&self) -> bool {
@@ -119,25 +149,63 @@ impl HydrationPlan {
         self.groups.iter()
     }
 
+    fn relations(&self) -> impl Iterator<Item = Relation> + '_ {
+        Relation::VARIANTS
+            .iter()
+            .copied()
+            .filter(|&relation| match relation.spec().role {
+                Role::Judged => {
+                    self.level.may_merge_retweets()
+                        && !self
+                            .nodes
+                            .intersection(relation.spec().trigger.reads())
+                            .is_empty()
+                }
+                Role::Read => self
+                    .nodes
+                    .iter()
+                    .any(|node| node.spec().relation == Some(relation)),
+            })
+    }
+
     pub(super) fn readers<'a>(&'a self, landed: &'a Group) -> impl Iterator<Item = &'a Group> {
         landed
             .readers
             .iter()
             .filter_map(|&position| self.groups.get(position))
     }
+
+    pub(super) fn call_deadline(
+        &self,
+        group: &Group,
+        claimed_edges: impl Iterator<Item = Edge>,
+    ) -> Duration {
+        claimed_edges
+            .filter_map(|edge| {
+                self.edge_ceilings
+                    .iter()
+                    .find(|&&(fetcher, read, _)| fetcher == group.fetcher && read == edge)
+                    .map(|&(.., ceiling)| ceiling)
+            })
+            .fold(group.ceiling(), Duration::max)
+    }
 }
 
 impl Group {
     pub(super) fn ceiling(&self) -> Duration {
         if self.nodes.has_must_have() {
-            HYDRATION_TIMEOUT
-        } else {
-            BEST_EFFORT_HYDRATION_TIMEOUT
+            return HYDRATION_TIMEOUT;
         }
+        self.nodes
+            .iter()
+            .find_map(|node| Expansion::of(node.relation()?))
+            .map_or(BEST_EFFORT_HYDRATION_TIMEOUT, |expansion| {
+                expansion.spec().deadline
+            })
     }
 
-    pub(super) fn label(&self) -> (String, String) {
-        (self.clients.join("+"), self.methods.join("+"))
+    pub(super) fn label(&self) -> (&'static str, &'static str) {
+        self.label
     }
 
     pub(super) fn fields(&self) -> &[QueryFields] {
@@ -149,30 +217,14 @@ impl Group {
     }
 }
 
-fn fields(source: Source, nodes: Hydrators) -> Vec<QueryFields> {
-    let nodes = match source {
-        Source::GizmoduckAuthor => Hydrator::VARIANTS
+fn fields(fetcher: FetcherId, nodes: Hydrators, rows: RequestRows) -> Vec<QueryFields> {
+    let nodes = match fetcher.asked_fields() {
+        AskedFields::EveryLevel => Hydrator::VARIANTS
             .iter()
             .copied()
-            .filter(|node| node.spec().source == source)
+            .filter(|node| node.spec_at(rows).fetcher() == fetcher)
             .fold(Hydrators::empty(), Hydrators::with),
-        Source::TesPureCoreData
-        | Source::TesConversationRoot
-        | Source::TesTweet
-        | Source::TesConversationControl
-        | Source::SafetyLabels
-        | Source::GizmoduckViewer
-        | Source::Flock
-        | Source::ViewerCountry
-        | Source::Wingman
-        | Source::CommunityModeration
-        | Source::CommunityModerator
-        | Source::CommunityViewerRemoved
-        | Source::ArticleLifecycle
-        | Source::ArticleMediaEntities
-        | Source::ArticleCoverMedia
-        | Source::TrustedFriends
-        | Source::UserLocation => nodes,
+        AskedFields::Planned => nodes,
     };
     let mut fields = Vec::new();
     for node in nodes.iter() {
@@ -204,21 +256,32 @@ fn edges(nodes: Hydrators) -> Vec<(Edge, Graph, EdgeDirection, Hydrators)> {
     edges
 }
 
+fn direction_label(direction: EdgeDirection) -> &'static str {
+    match direction {
+        EdgeDirection::Forward => "fwd",
+        EdgeDirection::Reverse => "rev",
+    }
+}
+
 impl fmt::Display for HydrationPlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let rows = match self.rows {
+            RequestRows::ActorPosts => " actor post rows",
+            RequestRows::Posts | RequestRows::Users => "",
+        };
         writeln!(
             f,
-            "{}: {} calls",
+            "{}{rows}: {} calls",
             <&str>::from(self.level),
             self.groups.len()
         )?;
         for group in &self.groups {
-            let (client, method) = group.label();
+            let (backend, call) = group.label();
             let after = group.input.map_or("-", <&str>::from);
             let nodes: Vec<&str> = group.nodes.iter().map(<&str>::from).collect();
             write!(
                 f,
-                "{client}/{method} after: {after} nodes: {}",
+                "{backend}/{call} after: {after} nodes: {}",
                 nodes.join(",")
             )?;
             let fields = group.fields();
@@ -227,13 +290,10 @@ impl fmt::Display for HydrationPlan {
                 write!(f, " fields: {}", fields.join("|"))?;
             }
             for &(_, graph, direction, nodes) in group.edges() {
-                let direction = match direction {
-                    EdgeDirection::Forward => "fwd",
-                    EdgeDirection::Reverse => "rev",
-                };
+                let direction = direction_label(direction);
                 let keys: Vec<String> = nodes
                     .iter()
-                    .map(|node| node.spec().key.to_string())
+                    .map(|node| node.key_at(self.rows).to_string())
                     .collect();
                 write!(
                     f,
@@ -248,7 +308,21 @@ impl fmt::Display for HydrationPlan {
             if group.ceiling() != HYDRATION_TIMEOUT {
                 write!(f, " timeout: {:?}", group.ceiling())?;
             }
+            for &(edge, graph, direction, _) in group.edges() {
+                let deadline = self.call_deadline(group, iter::once(edge));
+                if deadline > group.ceiling() {
+                    let graph: &str = graph.into();
+                    write!(
+                        f,
+                        " call: {deadline:?} on {graph}-{}",
+                        direction_label(direction)
+                    )?;
+                }
+            }
             writeln!(f)?;
+        }
+        for relation in self.relations() {
+            writeln!(f, "{relation}")?;
         }
         Ok(())
     }
@@ -256,76 +330,106 @@ impl fmt::Display for HydrationPlan {
 
 #[cfg(test)]
 mod tests {
+    use super::{Group, HydrationPlan, RequestRows};
+    use crate::hydration::{Hydrator, Hydrators};
     use crate::rules::{RuleEngine, SafetyLevel};
     use strum::VariantArray;
-
-    const PLANS: &str = "\
-filter_all: 1 calls
-tes/get_tweet_core_datas after: - nodes: pure_core
-timeline_home: 10 calls
-tes/get_tweet_core_datas after: - nodes: pure_core
-tes/get_tweets after: - nodes: tweet
-safety_labels/get after: - nodes: tweet_safety_labels
-gizmoduck/get_viewer_data after: - nodes: viewer_profile fields: ACCOUNT|EXTENDED_PROFILE|SAFETY (skipped logged out)
-gizmoduck/get_users after: pure_core nodes: author_safety fields: SAFETY|LABELS
-socialgraph/batch_check_relationships after: pure_core nodes: follows,blocks,mutes,mute_retweets follows-fwd[author] blocks-fwd[author] mutes-fwd[author] mute_retweets-fwd[retweeter] (skipped logged out)
-exclusive_content/batch_check_super_follows after: tweet nodes: super_follows_exclusive super_follows-fwd[exclusive_author] (skipped logged out)
-article/get_media_entities after: tweet nodes: article_media_entities
-article/get_cover_media after: tweet nodes: article_cover_media
-trusted_friends/is_member_or_owner after: tweet nodes: trusted_friends (skipped logged out)
-timeline_home_recommendations: 10 calls
-tes/get_tweet_core_datas after: - nodes: pure_core
-tes/get_tweets after: - nodes: tweet
-safety_labels/get after: - nodes: tweet_safety_labels
-gizmoduck/get_viewer_data after: - nodes: viewer_profile fields: ACCOUNT|EXTENDED_PROFILE|SAFETY (skipped logged out)
-gizmoduck/get_users after: pure_core nodes: author_safety,author_labels fields: SAFETY|LABELS
-socialgraph/batch_check_relationships after: pure_core nodes: follows,blocks,mutes,mute_retweets follows-fwd[author] blocks-fwd[author] mutes-fwd[author] mute_retweets-fwd[retweeter] (skipped logged out)
-exclusive_content/batch_check_super_follows after: tweet nodes: super_follows_exclusive super_follows-fwd[exclusive_author] (skipped logged out)
-article/get_media_entities after: tweet nodes: article_media_entities
-article/get_cover_media after: tweet nodes: article_cover_media
-trusted_friends/is_member_or_owner after: tweet nodes: trusted_friends (skipped logged out)
-timeline_home_hydration: 21 calls
-tes/get_tweet_core_datas after: - nodes: pure_core
-tes/get_tweets after: - nodes: tweet
-conversation_control/get_conversation_controls after: - nodes: conversation_control timeout: 300ms
-safety_labels/get after: - nodes: tweet_safety_labels
-gizmoduck/get_viewer_data after: - nodes: viewer_profile,viewer_labels fields: ACCOUNT|EXTENDED_PROFILE|SAFETY|LABELS (skipped logged out)
-gizmoduck/get_users after: pure_core nodes: author_safety fields: SAFETY|LABELS
-socialgraph+blocked_by/batch_check_relationships+batch_check_blocked_by after: pure_core nodes: follows,blocked_by_author,blocked_by_reply_root follows-fwd[author] blocks-rev[author,reply_root] (skipped logged out) timeout: 300ms
-exclusive_content/batch_check_super_follows after: tweet nodes: super_follows_exclusive super_follows-fwd[exclusive_author] (skipped logged out)
-conversation_control/batch_check_followed_by+batch_check_super_follows+batch_check_blocked_by after: conversation_control nodes: root_follows_viewer,super_follows_root,blocked_by_conversation_root follows-rev[root:Community|MyNetwork] super_follows-fwd[root:Subscribers] blocks-rev[control_root_author] (skipped logged out) timeout: 300ms
-conversation_control/exists_intersect after: root_follows_viewer nodes: root_follows_viewer_second_degree (skipped logged out) timeout: 300ms
-conversation_root/get_tweet_core_datas after: pure_core nodes: conversation_root_post (skipped logged out) timeout: 300ms
-conversation_root/batch_check_blocked_by after: conversation_root_post nodes: blocked_by_conversation_root_post blocks-rev[conversation_root_post_author] (skipped logged out) timeout: 300ms
-conversation_control/tfe_top_country after: conversation_control nodes: viewer_country (skipped logged out) timeout: 300ms
-communities/moderation_state after: tweet nodes: community_moderation
-communities/visibility_features after: community_moderation nodes: community_moderator (skipped logged out)
-communities/is_removed after: tweet nodes: community_viewer_removed (skipped logged out) timeout: 300ms
-article/get_lifecycles after: tweet nodes: article_lifecycle
-article/get_media_entities after: tweet nodes: article_media_entities
-article/get_cover_media after: tweet nodes: article_cover_media
-trusted_friends/is_member_or_owner after: tweet nodes: trusted_friends (skipped logged out)
-geoduck/user_location after: tweet nodes: outside_narrowcast_place (skipped logged out) timeout: 300ms
-immersive_expanded_recommendations: 10 calls
-tes/get_tweet_core_datas after: - nodes: pure_core
-tes/get_tweets after: - nodes: tweet
-safety_labels/get after: - nodes: tweet_safety_labels
-gizmoduck/get_viewer_data after: - nodes: viewer_profile fields: ACCOUNT|EXTENDED_PROFILE|SAFETY (skipped logged out)
-gizmoduck/get_users after: pure_core nodes: author_safety,author_labels fields: SAFETY|LABELS
-socialgraph/batch_check_relationships after: pure_core nodes: follows,blocks,mutes,mute_retweets follows-fwd[author] blocks-fwd[author] mutes-fwd[author] mute_retweets-fwd[retweeter] (skipped logged out)
-exclusive_content/batch_check_super_follows after: tweet nodes: super_follows_exclusive super_follows-fwd[exclusive_author] (skipped logged out)
-article/get_media_entities after: tweet nodes: article_media_entities
-article/get_cover_media after: tweet nodes: article_cover_media
-trusted_friends/is_member_or_owner after: tweet nodes: trusted_friends (skipped logged out)
-";
 
     #[test]
     fn each_level_plans_these_calls() {
         let engine = RuleEngine::for_tests();
         let plans: String = SafetyLevel::VARIANTS
             .iter()
-            .map(|&level| engine.plan(level).to_string())
+            .flat_map(|&level| {
+                std::iter::once(engine.plan(level)).chain(engine.post_kinds_plan(level))
+            })
+            .map(ToString::to_string)
             .collect();
-        assert_eq!(plans, PLANS);
+        crate::pinned::assert_pinned("tests/fixtures/plans.txt", &plans);
+    }
+
+    #[test]
+    fn every_node_of_a_call_carries_the_calls_label() {
+        for rows in [
+            RequestRows::Posts,
+            RequestRows::Users,
+            RequestRows::ActorPosts,
+        ] {
+            let plan = HydrationPlan::with_rows(SafetyLevel::FilterAll, rows, Hydrators::all());
+            for group in plan.groups() {
+                for node in group.nodes.iter() {
+                    assert_eq!(node.spec_at(rows).label, group.label(), "{rows:?} {node:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_two_calls_of_a_level_share_a_label() {
+        const SHARED: &[(SafetyLevel, (&str, &str), &str)] = &[(
+            SafetyLevel::QuotedTweetRules,
+            ("socialgraph", "quote_author_edges"),
+            "the must-have block select and the best-effort follow select ask one quote pair",
+        )];
+        let engine = RuleEngine::for_tests();
+        let mut shared = Vec::new();
+        for &level in SafetyLevel::VARIANTS {
+            for plan in std::iter::once(engine.plan(level)).chain(engine.post_kinds_plan(level)) {
+                let labels: Vec<(&str, &str)> = plan.groups().map(Group::label).collect();
+                for (position, &label) in labels.iter().enumerate() {
+                    if labels[..position].contains(&label) {
+                        shared.push((level, label));
+                    }
+                }
+            }
+        }
+        let listed: Vec<(SafetyLevel, (&str, &str))> = SHARED
+            .iter()
+            .map(|&(level, label, _)| (level, label))
+            .collect();
+        assert_eq!(shared, listed);
+    }
+
+    #[test]
+    fn groups_of_one_fetcher_claim_each_others_keys_only_through_an_edge() {
+        let engine = RuleEngine::for_tests();
+        for &level in SafetyLevel::VARIANTS {
+            for plan in std::iter::once(engine.plan(level)).chain(engine.post_kinds_plan(level)) {
+                let groups: Vec<_> = plan.groups().collect();
+                for (position, group) in groups.iter().enumerate() {
+                    for other in groups.iter().skip(position + 1) {
+                        if other.fetcher != group.fetcher {
+                            continue;
+                        }
+                        let nodes = group.nodes.union(other.nodes);
+                        assert!(
+                            nodes.iter().all(|node| node.edge().is_some()),
+                            "{level:?} {:?}: two groups claim one fetcher's keys",
+                            group.fetcher
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_level_of_user_rows_plans_no_pure_core_and_asks_the_actor_source_by_user() {
+        let nodes = Hydrators::of(Hydrator::ViewerProfile)
+            .with(Hydrator::AuthorSafety)
+            .with(Hydrator::Follows)
+            .with(Hydrator::Blocks);
+        let plan =
+            HydrationPlan::with_rows(SafetyLevel::QuotedTweetRules, RequestRows::Users, nodes);
+        assert_eq!(
+            plan.to_string(),
+            "\
+quoted_tweet_rules: 3 calls
+gizmoduck/viewer_profile after: - nodes: viewer_profile fields: ACCOUNT|EXTENDED_PROFILE|SAFETY (skipped logged out)
+gizmoduck/actor_profile after: - nodes: author_safety fields: SAFETY|LABELS|PROFILE
+socialgraph/viewer_author_edges after: - nodes: follows,blocks follows-fwd[users] blocks-fwd[users] (skipped logged out)
+"
+        );
+        assert!(plan.keys_only_user_rows_or_viewer());
     }
 }

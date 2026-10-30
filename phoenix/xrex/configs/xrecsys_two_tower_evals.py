@@ -83,6 +83,33 @@ def build_evals(mparams, dataset, has_user_features_token) -> list[EvalModule]:
             )
         )
 
+    for extra_name in mparams.get("extra_eval_dataset_types", []) or []:
+        extra_target = RetrievalDataset[extra_name] if isinstance(extra_name, str) else extra_name
+        if extra_target is target_dataset_type:
+            continue
+        extra_eval = RecsysTwoTowerEval(
+            max_steps=1,
+            positive_actions=positive_actions,
+            implicit_negative_actions=soft_negative_actions,
+            explicit_negative_actions=hard_negative_actions,
+            candidate_seq_len=mparams["candidate_seq_len"],
+            target_dataset_type=extra_target,
+            query_head_weights=_slot_weights(head_names, "home"),
+            metric_groups=["index_overlap", "global_recall"],
+            metadata_stats_unique_groups=[],
+            metadata_stats_median_groups=[],
+            metadata_stats_mean_groups=[],
+        )
+        evals.append(
+            EvalModule(
+                eval_name=f"recsys_two_tower_eval_{extra_target.name.lower()}",
+                eval_conf=extra_eval,
+                eval_bs_per_device=eval_bs,
+                eval_seq_len=home_eval_seq_len,
+                eval_dataset=dataset,
+            )
+        )
+
     if "ld" in head_names:
         ld_positive_actions = mparams.get(
             "ld_positive_actions",

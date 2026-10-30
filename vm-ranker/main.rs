@@ -15,6 +15,7 @@ use xai_vm_ranker::{
     ranker_service::VMRankerServiceImpl,
     ranking_config::RankingConfig,
     scoring::DppContext,
+    user_debias_store::UserDebiasStore,
 };
 
 #[tokio::main]
@@ -48,6 +49,12 @@ async fn main() -> Result<()> {
         info!("DPP rescoring disabled");
         (None, None)
     };
+
+    let user_debias = args.user_debias_artifact_path.clone().map(|path| {
+        let store = UserDebiasStore::load(path);
+        store.spawn_reloader(Duration::from_secs(args.user_debias_reload_secs.max(1)));
+        store
+    });
 
     let process_overrides = xai_feature_switches::parse_fs_overrides(
         &std::env::var("XAI_FS_OVERRIDES").unwrap_or_default(),
@@ -89,8 +96,12 @@ async fn main() -> Result<()> {
         None
     };
 
-    let ranker_service =
-        VMRankerServiceImpl::new(args.max_concurrent_requests, dpp, ranking_config);
+    let ranker_service = VMRankerServiceImpl::new(
+        args.max_concurrent_requests,
+        dpp,
+        user_debias,
+        ranking_config,
+    );
     info!(
         "Initialized VMRankerService with max_concurrent_requests={}",
         args.max_concurrent_requests

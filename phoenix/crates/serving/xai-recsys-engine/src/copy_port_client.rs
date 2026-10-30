@@ -29,6 +29,20 @@ pub struct DownloadMeta {
     pub prefix: String,
     pub checksums_json: String,
     pub created_timestamp: f64,
+    pub entries: Vec<DenseEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DenseEntry {
+    pub key: String,
+    pub name: String,
+    pub adler32: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShardLayout {
+    pub piece_bytes: usize,
+    pub pieces: usize,
 }
 
 #[derive(Debug)]
@@ -150,7 +164,7 @@ fn checkpoint_prefix_from_path(path: &str) -> Result<String, CopyPortError> {
     Ok(format!("{}/{}/", parts[n - 2], parts[n - 1]))
 }
 
-fn parse_elapsed_from_prefix(prefix: &str) -> Option<u64> {
+pub fn parse_elapsed_from_prefix(prefix: &str) -> Option<u64> {
     let first = prefix.split('/').next()?;
     let n = first.strip_prefix("elapsed_samples_")?;
     n.parse().ok()
@@ -497,6 +511,7 @@ pub async fn download_dense_weight(
         prefix,
         checksums_json,
         created_timestamp,
+        entries: dense_entries(&index, tensors, &results),
     })
 }
 
@@ -528,6 +543,7 @@ pub async fn download_dense_and_embeddings(
         run_downloads(futures, rate_limit_bytes_per_sec, max_concurrent_downloads).await?;
     sfence_after_download();
     check_transfer_results(&results, &sizes)?;
+    let dense = dense_entries(&index, tensors, &results);
 
     let checksums_json = String::from_utf8(checksums_buf).unwrap_or_default();
     let created_timestamp = serde_json::from_str::<serde_json::Value>(&checksums_json)
@@ -619,6 +635,7 @@ pub async fn download_dense_and_embeddings(
             prefix,
             checksums_json,
             created_timestamp,
+            entries: dense,
         },
         emb_ck,
         pe_ck,
@@ -806,6 +823,28 @@ pub async fn download_embedding_table(
     rate_limit_bytes_per_sec: Option<u64>,
     max_concurrent_downloads: Option<usize>,
 ) -> Result<u32, CopyPortError> {
+    download_embedding_table_with_layout(
+        path,
+        urls,
+        name,
+        buf,
+        rate_limit_bytes_per_sec,
+        max_concurrent_downloads,
+        false,
+    )
+    .await
+    .map(|(checksum, _)| checksum)
+}
+
+pub async fn download_embedding_table_with_layout(
+    path: &str,
+    urls: &str,
+    name: &str,
+    buf: &mut [u8],
+    rate_limit_bytes_per_sec: Option<u64>,
+    max_concurrent_downloads: Option<usize>,
+    replicas: bool,
+) -> Result<(u32, ShardLayout), CopyPortError> {
     download_embedding_table_with_conns(
         path,
         urls,
@@ -815,6 +854,7 @@ pub async fn download_embedding_table(
         max_concurrent_downloads,
         crate::emb_table::peer_conns_per_source(),
         crate::emb_table::trainer_conns_per_source(),
+        replicas,
     )
     .await
 }
@@ -828,14 +868,22 @@ async fn download_embedding_table_with_conns(
     max_concurrent_downloads: Option<usize>,
     peer_conns_per_source: usize,
     trainer_conns_per_source: usize,
-) -> Result<u32, CopyPortError> {
+    replicas: bool,
+) -> Result<(u32, ShardLayout), CopyPortError> {
     let prefix = checkpoint_prefix_from_path(path)?;
     let resolved = resolve_copy_urls(urls).await?;
     let (mut channels, entries, endpoints) = connect_and_list(&resolved, prefix.clone()).await?;
-    let layout = ShardedLayout::from_listing(name, &entries)?;
+    let mut layout = ShardedLayout::from_listing(name, &entries)?;
+    if replicas {
+        layout.ownership = layout.ownership.into_replicas();
+    }
     layout.check_buffer_size(name, buf.len())?;
+    let shard_layout = ShardLayout {
+        piece_bytes: layout.piece_bytes,
+        pieces: layout.total_pieces(),
+    };
     if trainer_conns_per_source > 1 && matches!(layout.ownership, ShardOwnership::Sharded { .. }) {
-        return download_sharded_with_channels(
+        let checksum = download_sharded_with_channels(
             &channels,
             &entries,
             &prefix,
@@ -846,7 +894,8 @@ async fn download_embedding_table_with_conns(
             &endpoints,
             trainer_conns_per_source,
         )
-        .await;
+        .await?;
+        return Ok((checksum, shard_layout));
     }
     if matches!(layout.ownership, ShardOwnership::Replicated { .. }) {
         crate::emb_table::expand_replicated_channels(
@@ -864,7 +913,8 @@ async fn download_embedding_table_with_conns(
     let results = run_downloads(futures, rate_limit_bytes_per_sec, concurrent).await?;
     sfence_after_download();
     let results = results_in_piece_order(results, &schedule)?;
-    combine_transfer_checksums(&results, &expected)
+    let checksum = combine_transfer_checksums(&results, &expected)?;
+    Ok((checksum, shard_layout))
 }
 
 struct DenseListing<'a> {
@@ -949,6 +999,22 @@ fn build_dense_downloads(
     Ok((futures, sizes, checksums))
 }
 
+fn dense_entries(
+    index: &DenseListing<'_>,
+    tensors: &[TensorBuf<'_>],
+    results: &[(usize, u32)],
+) -> Vec<DenseEntry> {
+    tensors
+        .iter()
+        .zip(results)
+        .map(|(t, &(_, adler32))| DenseEntry {
+            key: t.key.clone(),
+            name: index.names_sizes[t.key.as_str()].0.to_owned(),
+            adler32,
+        })
+        .collect()
+}
+
 lazy_static! {
     pub(crate) static ref PEER_SEND_MAX_BYTES: usize = {
         std::env::var("COPY_PORT_PEER_SEND_MAX_BYTES")
@@ -990,6 +1056,20 @@ pub(crate) enum ShardOwnership {
     Replicated {
         total_pieces: usize,
     },
+}
+
+impl ShardOwnership {
+    fn into_replicas(self) -> ShardOwnership {
+        match self {
+            ShardOwnership::Sharded {
+                owner,
+                pieces_per_rank,
+            } if pieces_per_rank == owner.len() => ShardOwnership::Replicated {
+                total_pieces: owner.len(),
+            },
+            other => other,
+        }
+    }
 }
 
 pub(crate) fn classify_shard_ownership(
@@ -2441,13 +2521,14 @@ mod trainer_e2e_tests {
                 Some(2),
                 16,
                 2,
+                false,
             )
             .await;
             assert_eq!(traffic.active.load(Ordering::SeqCst), 0);
             if fault == 2 {
                 assert!(matches!(result, Err(CopyPortError::TransferFailed(_))));
             } else {
-                assert_eq!(result.unwrap(), simd_adler32::adler32(&buf.as_slice()));
+                assert_eq!(result.unwrap().0, simd_adler32::adler32(&buf.as_slice()));
                 assert_eq!(buf, (0..14).collect::<Vec<u8>>());
             }
             assert_eq!(
@@ -2456,12 +2537,48 @@ mod trainer_e2e_tests {
             );
         }
     }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[serial_test::serial(copy_tls_env)]
+    async fn single_peer_downloads_as_a_replica() {
+        for (replicas, sends_from) in [(false, 1), (true, 4)] {
+            let traffic = Arc::new(Traffic::default());
+            let (url, sockets, _server) =
+                serve(tensor("emb_table", 0..4, 7), traffic.clone(), None).await;
+            let mut buf = vec![255; 28];
+            let (checksum, layout) = download_embedding_table_with_conns(
+                PREFIX,
+                &url,
+                "emb_table",
+                &mut buf,
+                None,
+                Some(4),
+                4,
+                1,
+                replicas,
+            )
+            .await
+            .unwrap();
+            assert_eq!((0..28).collect::<Vec<u8>>(), buf);
+            assert_eq!(simd_adler32::adler32(&buf.as_slice()), checksum);
+            assert_eq!(
+                ShardLayout {
+                    piece_bytes: 7,
+                    pieces: 4
+                },
+                layout
+            );
+            assert_eq!(sends_from, sockets.lock().unwrap().len());
+        }
+    }
 }
 
 #[cfg(all(test, target_os = "linux", feature = "rdma-tests"))]
 mod p2p_e2e_tests {
     use super::*;
     use crate::copy::{CopyService, ManifestSpec, Sender};
+    use crate::copy_manifest::PeerServeState;
+    use bytes::Bytes;
     use simd_adler32::adler32;
 
     const PREFIX: &str = "elapsed_samples_000000000000000042/testrun/";
@@ -2531,7 +2648,7 @@ mod p2p_e2e_tests {
         let urls = format!("{peer_a},{peer_b}");
 
         let mut buf = vec![0u8; PIECE * PIECES];
-        let checksum = download_embedding_table_with_conns(
+        let (checksum, layout) = download_embedding_table_with_conns(
             &format!("/dev/shm/{PREFIX}"),
             &urls,
             "emb",
@@ -2540,12 +2657,20 @@ mod p2p_e2e_tests {
             None,
             2,
             1,
+            true,
         )
         .await
         .unwrap();
 
         assert_eq!(buf, data);
         assert_eq!(checksum, adler32(&&data[..]));
+        assert_eq!(
+            ShardLayout {
+                piece_bytes: PIECE,
+                pieces: PIECES
+            },
+            layout
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -2584,7 +2709,7 @@ mod p2p_e2e_tests {
         let urls = format!("{peer_a},{stale},{peer_b}");
 
         let mut buf = vec![0u8; PIECE * PIECES];
-        let checksum = download_embedding_table_with_conns(
+        let (checksum, layout) = download_embedding_table_with_conns(
             &format!("/dev/shm/{PREFIX}"),
             &urls,
             "emb",
@@ -2593,12 +2718,20 @@ mod p2p_e2e_tests {
             None,
             2,
             1,
+            true,
         )
         .await
         .unwrap();
 
         assert_eq!(buf, data);
         assert_eq!(checksum, adler32(&&data[..]));
+        assert_eq!(
+            ShardLayout {
+                piece_bytes: PIECE,
+                pieces: PIECES
+            },
+            layout
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -2678,5 +2811,86 @@ mod p2p_e2e_tests {
         assert_eq!(buf, data);
         assert_eq!(result.unwrap(), adler32(&&data[..]));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial_test::serial(copy_tls_env)]
+    async fn memory_manifest_round_trip() {
+        let dense = Bytes::from((0..300u32).map(|i| i as u8).collect::<Vec<u8>>());
+        let emb = Bytes::from(
+            (0..PIECE * PIECES)
+                .map(|i| (i % 247) as u8)
+                .collect::<Vec<u8>>(),
+        );
+        let mut memory = vec![
+            (format!("{PREFIX}params.w/c/0"), dense.clone()),
+            (
+                format!("{PREFIX}checksums.0.json"),
+                Bytes::from_static(br#"{"created_timestamp":7.0}"#),
+            ),
+        ];
+        memory.extend((0..PIECES).map(|j| {
+            (
+                format!("{PREFIX}emb/c/{j}/0"),
+                emb.slice(j * PIECE..(j + 1) * PIECE),
+            )
+        }));
+        let state = Arc::new(PeerServeState::new(4, None));
+        state.publish_with_memory(vec![], memory).unwrap();
+        let sender = Arc::new(Sender::new(12).with_peer_state(state).manifest_only());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("127.0.0.1:{}", listener.local_addr().unwrap().port());
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(CopyService::from_arc(sender))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+        );
+
+        let mut w = vec![0u8; dense.len()];
+        let meta = download_dense_weight(
+            0,
+            &url,
+            &mut [TensorBuf {
+                key: "params.w".into(),
+                buf: &mut w,
+            }],
+            None,
+            None,
+            Some(PREFIX),
+        )
+        .await
+        .unwrap();
+        assert_eq!(&dense[..], &w[..]);
+        assert_eq!(
+            vec![DenseEntry {
+                key: "params.w".into(),
+                name: format!("{PREFIX}params.w/c/0"),
+                adler32: adler32(&&dense[..]),
+            }],
+            meta.entries
+        );
+        assert_eq!(7.0, meta.created_timestamp);
+
+        let mut buf = vec![0u8; emb.len()];
+        let (checksum, layout) = download_embedding_table_with_layout(
+            &format!("/dev/shm/{PREFIX}"),
+            &url,
+            "emb",
+            &mut buf,
+            None,
+            None,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(&emb[..], &buf[..]);
+        assert_eq!(adler32(&&emb[..]), checksum);
+        assert_eq!(
+            ShardLayout {
+                piece_bytes: PIECE,
+                pieces: PIECES
+            },
+            layout
+        );
     }
 }

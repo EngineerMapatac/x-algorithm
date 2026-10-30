@@ -90,6 +90,7 @@ class ModelName:
     EAPI_GROK_4_3_INTERNAL = "eapi-grok-4-3-internal"
     EAPI_GROK_4_3_X_ALGO = "eapi-grok-4-3-x-algo"
     EAPI_GROK_4_5_X_ALGO = "eapi-grok-4-5-x-algo"
+    EAPI_GROK_4_5_INTERNAL = "eapi-grok-4-5-internal"
     EAPI_GROK_4_6_INTERNAL = "eapi-grok-4-6-internal"
 
 
@@ -111,9 +112,9 @@ class MediaHydrationConfig(BaseModel):
     image_tile_size: int = 448
     enable_light_dark_enhancement: bool = False
     enable_clahe_enhancement: bool = False
-    enable_motion_reveal: bool = False
     enable_local_broadcast_frame_extraction: bool = False
     enable_video_preview_image: bool = False
+    highest_video_bitrate: bool = False
     deluxe_fav_count_threshold: int = 64
     deluxe_video_max_frames: int = 30
     deluxe_video_tile_size: int = 600
@@ -216,6 +217,11 @@ class MediaReferenceBundleConfig(BaseModel):
     refresh_interval_s: int = 900
 
 
+class XReviewIntakeConfig(BaseModel):
+    endpoint: str
+    timeout: float = 10.0
+
+
 class GroxConfig(BaseSettings):
     metrics: MetricsConfig = MetricsConfig()
     logging: LoggingConfig = LoggingConfig()
@@ -246,6 +252,7 @@ class GroxConfig(BaseSettings):
     kerberos: KerberosConfig = KerberosConfig()
     asr: ASRConfig = ASRConfig()
     prompt_tokens: PromptTokensConfig = PromptTokensConfig()
+    xreview_intake: XReviewIntakeConfig | None = None
 
     model_config = SettingsConfigDict(yaml_file=_get_config_file_paths(), frozen=True)
 

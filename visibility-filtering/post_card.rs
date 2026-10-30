@@ -2,6 +2,11 @@ use xai_core_entities::entities::{GizmoduckUserProfile, PureCoreData};
 use xai_x_thrift::media_entity::MediaEntity;
 use xai_x_thrift::tweet_media::MediaInfo;
 
+#[tonic::async_trait]
+pub(crate) trait PostCards: Send + Sync {
+    async fn post_card(&self, tweet_id: u64) -> Option<PostCard>;
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PostCard {
     pub id: u64,

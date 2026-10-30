@@ -1,10 +1,13 @@
-use super::builders::{labeled, no_stated_age_viewer, tweet_candidate, viewer_with_age};
-use super::{Role, Row};
+use super::{Role, Row, Subject};
 use crate::models::{AuthorFeatures, NsfwViewerDropReason, SafetyLabelType, ViewerAge};
 use crate::rules::fixtures::{
-    allow, blurred, candidate, dropped, nsfw_viewer_dropped, sensitive_opt_in_viewer,
+    allow, blurred, candidate, dropped, labeled, no_stated_age_viewer, nsfw_viewer_dropped,
+    sensitive_opt_in_viewer, tweet_candidate, viewer_with_age,
 };
-use crate::rules::SafetyLevel::{TimelineHome, TimelineHomeRecommendations};
+use crate::rules::SafetyLevel::{
+    ImmersiveExpandedRecommendations, TimelineHome, TimelineHomeHydration,
+    TimelineHomeRecommendations,
+};
 use xai_visibility_filtering::models::FilteredReason;
 use xai_x_thrift::action::InterstitialReason;
 
@@ -14,10 +17,12 @@ pub(super) fn rows() -> Vec<Row> {
     vec![
         Row {
             name: "nsfw_high_precision_label_at_cutoff",
-            post: candidate()
-                .tweet_id(AT_CUTOFF)
-                .with_label(SafetyLabelType::NSFW_HIGH_PRECISION)
-                .build(),
+            subject: Subject::Post(
+                candidate()
+                    .tweet_id(AT_CUTOFF)
+                    .with_label(SafetyLabelType::NSFW_HIGH_PRECISION)
+                    .build(),
+            ),
             expect: vec![(
                 TimelineHome,
                 Role::NonFollower,
@@ -29,14 +34,16 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "nsfw_admin_and_user_author_media",
-            post: candidate()
-                .with_author_features(AuthorFeatures {
-                    is_nsfw_user: true,
-                    is_nsfw_admin: true,
-                    ..Default::default()
-                })
-                .with_media()
-                .build(),
+            subject: Subject::Post(
+                candidate()
+                    .with_author_features(AuthorFeatures {
+                        is_nsfw_user: true,
+                        is_nsfw_admin: true,
+                        ..Default::default()
+                    })
+                    .with_media()
+                    .build(),
+            ),
             expect: vec![(
                 TimelineHome,
                 Role::NonFollower,
@@ -48,10 +55,12 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "gore_and_nsfw_card_image_labels",
-            post: candidate()
-                .with_label(SafetyLabelType::GORE_AND_VIOLENCE_HIGH_PRECISION)
-                .with_label(SafetyLabelType::NSFW_CARD_IMAGE)
-                .build(),
+            subject: Subject::Post(
+                candidate()
+                    .with_label(SafetyLabelType::GORE_AND_VIOLENCE_HIGH_PRECISION)
+                    .with_label(SafetyLabelType::NSFW_CARD_IMAGE)
+                    .build(),
+            ),
             expect: vec![(
                 TimelineHome,
                 Role::NonFollower,
@@ -63,10 +72,12 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "nsfw_high_precision_adult_label",
-            post: candidate()
-                .tweet_id(AT_CUTOFF + (1 << 22))
-                .with_label(SafetyLabelType::NSFW_HIGH_PRECISION)
-                .build(),
+            subject: Subject::Post(
+                candidate()
+                    .tweet_id(AT_CUTOFF + (1 << 22))
+                    .with_label(SafetyLabelType::NSFW_HIGH_PRECISION)
+                    .build(),
+            ),
             expect: vec![
                 (
                     TimelineHome,
@@ -86,7 +97,7 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "nsfw_high_precision_label",
-            post: labeled(SafetyLabelType::NSFW_HIGH_PRECISION),
+            subject: Subject::Post(labeled(SafetyLabelType::NSFW_HIGH_PRECISION)),
             expect: vec![
                 (TimelineHome, Role::Author, allow()),
                 (
@@ -139,7 +150,7 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "gore_and_violence_label",
-            post: labeled(SafetyLabelType::GORE_AND_VIOLENCE_HIGH_PRECISION),
+            subject: Subject::Post(labeled(SafetyLabelType::GORE_AND_VIOLENCE_HIGH_PRECISION)),
             expect: vec![
                 (
                     TimelineHome,
@@ -176,7 +187,7 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "nsfw_card_image_label",
-            post: labeled(SafetyLabelType::NSFW_CARD_IMAGE),
+            subject: Subject::Post(labeled(SafetyLabelType::NSFW_CARD_IMAGE)),
             expect: vec![
                 (
                     TimelineHome,
@@ -201,7 +212,23 @@ pub(super) fn rows() -> Vec<Row> {
                     ),
                 ),
                 (
+                    TimelineHomeHydration,
+                    Role::LoggedOut,
+                    nsfw_viewer_dropped(
+                        NsfwViewerDropReason::LoggedOut,
+                        "sensitive_viewer_logged_out/drop",
+                    ),
+                ),
+                (
                     TimelineHome,
+                    Role::As("no_stated_age_in_gb", no_stated_age_viewer("gb")),
+                    nsfw_viewer_dropped(
+                        NsfwViewerDropReason::HasNoStatedAge,
+                        "sensitive_viewer_no_stated_age/drop",
+                    ),
+                ),
+                (
+                    TimelineHomeHydration,
                     Role::As("no_stated_age_in_gb", no_stated_age_viewer("gb")),
                     nsfw_viewer_dropped(
                         NsfwViewerDropReason::HasNoStatedAge,
@@ -225,17 +252,43 @@ pub(super) fn rows() -> Vec<Row> {
                     ),
                 ),
                 (TimelineHomeRecommendations, Role::Author, allow()),
+                (
+                    TimelineHomeRecommendations,
+                    Role::LoggedOut,
+                    nsfw_viewer_dropped(
+                        NsfwViewerDropReason::LoggedOut,
+                        "sensitive_viewer_logged_out/drop",
+                    ),
+                ),
+                (
+                    TimelineHomeRecommendations,
+                    Role::As("no_stated_age_in_gb", no_stated_age_viewer("gb")),
+                    nsfw_viewer_dropped(
+                        NsfwViewerDropReason::HasNoStatedAge,
+                        "sensitive_viewer_no_stated_age/drop",
+                    ),
+                ),
+                (
+                    ImmersiveExpandedRecommendations,
+                    Role::As("no_stated_age_in_gb", no_stated_age_viewer("gb")),
+                    nsfw_viewer_dropped(
+                        NsfwViewerDropReason::HasNoStatedAge,
+                        "sensitive_viewer_no_stated_age/drop",
+                    ),
+                ),
             ],
         },
         Row {
             name: "nsfw_admin_author_media",
-            post: candidate()
-                .with_author_features(AuthorFeatures {
-                    is_nsfw_admin: true,
-                    ..Default::default()
-                })
-                .with_media()
-                .build(),
+            subject: Subject::Post(
+                candidate()
+                    .with_author_features(AuthorFeatures {
+                        is_nsfw_admin: true,
+                        ..Default::default()
+                    })
+                    .with_media()
+                    .build(),
+            ),
             expect: vec![
                 (
                     TimelineHome,
@@ -253,17 +306,35 @@ pub(super) fn rows() -> Vec<Row> {
                         "sensitive_viewer_underage/drop",
                     ),
                 ),
+                (
+                    TimelineHomeRecommendations,
+                    Role::NonFollower,
+                    dropped(
+                        FilteredReason::ContainNsfwMedia,
+                        "nsfw_admin_author/drop/nsfw_media",
+                    ),
+                ),
+                (
+                    TimelineHomeRecommendations,
+                    Role::Follower,
+                    dropped(
+                        FilteredReason::ContainNsfwMedia,
+                        "nsfw_admin_author/drop/nsfw_media",
+                    ),
+                ),
             ],
         },
         Row {
             name: "nsfw_user_author_media",
-            post: candidate()
-                .with_author_features(AuthorFeatures {
-                    is_nsfw_user: true,
-                    ..Default::default()
-                })
-                .with_media()
-                .build(),
+            subject: Subject::Post(
+                candidate()
+                    .with_author_features(AuthorFeatures {
+                        is_nsfw_user: true,
+                        ..Default::default()
+                    })
+                    .with_media()
+                    .build(),
+            ),
             expect: vec![
                 (
                     TimelineHome,
@@ -289,14 +360,22 @@ pub(super) fn rows() -> Vec<Row> {
                         "nsfw_user_author/drop/nsfw_media",
                     ),
                 ),
+                (
+                    TimelineHomeRecommendations,
+                    Role::Follower,
+                    dropped(
+                        FilteredReason::ContainNsfwMedia,
+                        "nsfw_user_author/drop/nsfw_media",
+                    ),
+                ),
             ],
         },
         Row {
             name: "nsfw_admin_flag_media",
-            post: tweet_candidate(|t| {
+            subject: Subject::Post(tweet_candidate(|t| {
                 t.nsfw.admin = true;
                 t.media.has_media = true;
-            }),
+            })),
             expect: vec![
                 (
                     TimelineHome,
@@ -318,10 +397,10 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "nsfw_user_flag_media",
-            post: tweet_candidate(|t| {
+            subject: Subject::Post(tweet_candidate(|t| {
                 t.nsfw.user = true;
                 t.media.has_media = true;
-            }),
+            })),
             expect: vec![
                 (
                     TimelineHome,

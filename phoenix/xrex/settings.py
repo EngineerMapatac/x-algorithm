@@ -15,9 +15,6 @@ GRPC_DATALOADER_ADDRESS: str = os.environ.get("XREX_GRPC_DATALOADER_ADDRESS", ""
 
 OTEL_ENDPOINT: str = os.environ.get("XREX_OTEL_ENDPOINT", "")
 
-SID_TOPIC: str = os.environ.get("XREX_SID_TOPIC", "recsys_sid_training")
-SID_KAFKA_CLUSTER: str = os.environ.get("XREX_SID_KAFKA_CLUSTER", "phoenix")
-
 RANKING_KAFKA_TOPIC: str = os.environ.get("XREX_RANKING_KAFKA_TOPIC", "recsys_ranking_training")
 RANKING_RUST_KAFKA_TOPIC: str = os.environ.get(
     "XREX_RANKING_RUST_KAFKA_TOPIC", "recsys_ranking_training"
@@ -33,8 +30,6 @@ RETRIEVAL_RUST_KAFKA_TOPIC: str = os.environ.get(
     "XREX_RETRIEVAL_RUST_KAFKA_TOPIC", "recsys_retrieval_training"
 )
 
-GEN_RECS_TOPIC: str = os.environ.get("XREX_GEN_RECS_TOPIC", "recsys_gen_recs_training")
-
 KAFKA_BOOTSTRAP_SERVERS: str = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "")
 KAFKA_SASL_USERNAME: str = os.environ.get("KAFKA_SASL_USERNAME", "")
 
@@ -46,20 +41,6 @@ SID_GLOBAL_IDS_SNAPSHOT: str = os.environ.get("XREX_SID_GLOBAL_IDS_SNAPSHOT", ""
 SID_VIDEO_GLOBAL_IDS_SNAPSHOT: str = os.environ.get("XREX_SID_VIDEO_GLOBAL_IDS_SNAPSHOT", "")
 
 SID_DECODER_PATH: str = os.environ.get("XREX_SID_DECODER_PATH", "")
-
-GEN_RECS_GLOBAL_IDS: str = os.environ.get(
-    "XREX_GEN_RECS_GLOBAL_IDS", "/path/to/global_negative_pool.parquet"
-)
-
-GEN_RECS_OFFLINE_DATA_PATH: str = os.environ.get("OFFLINE_DATA_PATH", "synth_dump_gen_recs")
-GEN_RECS_OFFLINE_ARTIFACTS_DIR: str = os.environ.get(
-    "OFFLINE_ARTIFACTS_DIR", "synth_index/gen_recs_artifacts"
-)
-
-GEN_RECS_EVAL_POST_EMB_PATH: str = os.environ.get(
-    "XREX_GEN_RECS_EVAL_POST_EMB_PATH",
-    "synth_index/gen_recs_artifacts/inference_posts.parquet",
-)
 
 
 OBJECT_STORE_ENDPOINT: str = os.environ.get(
@@ -87,6 +68,10 @@ ADS_CONVERSION_CHECKPOINT_DIR: str = os.environ.get("XREX_ADS_CONVERSION_CHECKPO
 
 
 AOT_CACHE_DIR: str = os.environ.get("XREX_AOT_CACHE_DIR", "")
+
+HISTORY_URL_EMBEDDING_XDS_BOOTSTRAP: str = os.environ.get(
+    "XREX_HISTORY_URL_EMBEDDING_XDS_BOOTSTRAP", ""
+)
 
 
 REPL_SOCKET_PATH: str = os.environ.get("XREX_REPL_SOCKET", "/tmp/driver.sock")

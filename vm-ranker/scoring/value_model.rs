@@ -16,6 +16,7 @@ use crate::metrics::{
 };
 use crate::params::*;
 use crate::ranking_config::snowflake_creation_ms;
+use crate::scoring::{debias, DebiasModels};
 
 const NEW_USER_MIN_FOLLOWING: u32 = 5;
 const FALLBACK_WARN_INTERVAL_MS: u64 = 10_000;
@@ -26,6 +27,7 @@ static LAST_FALLBACK_WARN_MS: AtomicU64 = AtomicU64::new(0);
 pub struct ValueModelOutput {
     pub weighted: Vec<f64>,
     pub scores: Vec<f64>,
+    pub debiased: bool,
 }
 
 struct Fallback {
@@ -47,18 +49,19 @@ pub fn compute(
     params: Option<&Params>,
     author_rules: Option<&AuthorRulesEvaluator>,
     compute_value_model: bool,
+    debias: &DebiasModels,
 ) -> Option<ValueModelOutput> {
     if !compute_value_model {
-        record_request("passthrough");
+        record_request("passthrough", false);
         return None;
     }
-    match compute_or_fallback(req, params, author_rules) {
+    match compute_or_fallback(req, params, author_rules, debias) {
         Ok(output) => {
-            record_request("value_model");
+            record_request("value_model", output.debiased);
             Some(output)
         }
         Err(fallback) => {
-            record_request("fallback");
+            record_request("fallback", false);
             record_fallback(&fallback, req.viewer_id);
             None
         }
@@ -86,7 +89,7 @@ pub fn weights_from_params(params: &Params, viewer_id: u64) -> ValueModelWeights
         follow_author: params.get(FollowAuthorWeight),
         post_unexplored: params.get(PostUnexploredWeight),
         post_unexplored_include_out_of_network: params.get(PostUnexploredIncludeOutOfNetwork),
-        react_with_video: params.get(ReactWithVideoWeight),
+        post_video: params.get(PostVideoWeight),
         not_interested: params.get(NotInterestedWeight),
         block_author: params.get(BlockAuthorWeight),
         mute_author: params.get(MuteAuthorWeight),
@@ -155,6 +158,7 @@ fn compute_or_fallback(
     req: &RankRequest,
     params: Option<&Params>,
     author_rules: Option<&AuthorRulesEvaluator>,
+    debias: &DebiasModels,
 ) -> Result<ValueModelOutput, Fallback> {
     let params = params.ok_or_else(|| Fallback::new("no_config", ""))?;
     let weights = weights_from_params(params, req.viewer_id);
@@ -166,6 +170,7 @@ fn compute_or_fallback(
     if let Some(author_rules) = author_rules {
         set_author_exploration_bonuses(author_rules, &mut inputs);
     }
+
     let raw = compute_value_scores(&weights, &ctx, &inputs);
     if rand::random_bool(SCORE_METRICS_SAMPLE_RATE) {
         record_score_metrics(&inputs, &raw);
@@ -177,9 +182,26 @@ fn compute_or_fallback(
         "heads"
     };
     VALUE_MODEL_STAGE.with_label_values(&[stage]).inc();
+    if cached_weighted {
+        return Ok(ValueModelOutput {
+            weighted: raw.weighted,
+            scores: raw.scores,
+            debiased: false,
+        });
+    }
+
+    let Some(recentered) = debias::recenter(req, params, debias.user.as_deref(), &inputs) else {
+        return Ok(ValueModelOutput {
+            weighted: raw.weighted,
+            scores: raw.scores,
+            debiased: false,
+        });
+    };
+    let debiased = compute_value_scores(&weights, &ctx, &recentered);
     Ok(ValueModelOutput {
-        weighted: raw.weighted,
-        scores: raw.scores,
+        weighted: debiased.weighted,
+        scores: debiased.scores,
+        debiased: true,
     })
 }
 
@@ -265,8 +287,10 @@ fn record_score_metrics(inputs: &[CandidateScoringInputs], raw: &ValueScores) {
     }
 }
 
-fn record_request(mode: &str) {
-    VALUE_MODEL_REQUESTS.with_label_values(&[mode]).inc();
+fn record_request(mode: &str, debias_applied: bool) {
+    VALUE_MODEL_REQUESTS
+        .with_label_values(&[mode, if debias_applied { "on" } else { "off" }])
+        .inc();
 }
 
 fn record_fallback(fallback: &Fallback, viewer_id: u64) {

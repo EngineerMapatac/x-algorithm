@@ -83,6 +83,19 @@ ADS_PRODUCT_KEY_HASH_MODULUS = 2_147_483_647
 STALE_POST_14D_TTL_SEC = 1_213_200
 STALE_POST_30D_TTL_SEC = 2_595_600
 
+ADS_COUNT_FAMILIES: tuple[str, ...] = (
+    "View",
+    "Click",
+    "LongDwellClick",
+    "VideoOpen",
+    "LongVideoView",
+    "Fav",
+    "NotInterested",
+)
+ADS_COUNT_WINDOWS: tuple[str, ...] = ("1h", "3h", "12h", "24h", "3d", "7d", "14d", "28d")
+NUM_ADS_COUNT_FEATURES = 168
+ADS_COUNT_BUCKETS = 33
+
 
 CATEGORICAL_FEATURES: list[str] = [f.name for f in CategoricalFeature]
 BOOL_FEATURES: list[str] = [f.name for f in BoolFeature]
@@ -156,6 +169,13 @@ OPTIONAL_COLUMNS: list[str] = [
     "sample_source",
     "valueLabelValidSeq",
     "valueBaselineMeanUsdSeq",
+    "lineItemIdSeq",
+    "auxValueContentViewRatioSeq",
+    "auxValueContentViewValidSeq",
+    "auxValueContentViewBaselineMeanUsdSeq",
+    "auxValueAddToCartRatioSeq",
+    "auxValueAddToCartValidSeq",
+    "auxValueAddToCartBaselineMeanUsdSeq",
     "conversionKeepBits",
     "conversionEligibleTypesSeq",
     "conversionDelayMsSeq",

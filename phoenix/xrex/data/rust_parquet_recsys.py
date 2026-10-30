@@ -322,6 +322,9 @@ class RustParquetDataset(PhoenixDataset):
     def _counts_steps_from_manifest(self) -> bool:
         return False
 
+    def supports_follow_data_end(self) -> bool:
+        return False
+
     def make(
         self,
         *,
@@ -409,15 +412,18 @@ class RustParquetDataset(PhoenixDataset):
                 dataset.global_author_ids,
                 embedding_type=dataset.multimodal_embedding_type,
                 search_query_embedding_dim=dataset.search_query_embedding_dim,
+                aux_value_events=dataset.aux_value_events,
                 sid_num_levels=(dataset.sid_num_levels if dataset.use_post_sid else 0),
                 compute_post_unexplored_label=dataset.compute_post_unexplored_label,
                 zero_stale_post_14d_candidate_counts=dataset.enable_stale_post,
                 stale_post_30d=dataset.enable_stale_post_30d,
                 ads_head_masking=dataset.ads_head_masking,
+                dump_keep_rate_per_10000=dataset.dump_keep_rate_per_10000,
                 ads_pixel_head_masking=dataset.ads_pixel_head_masking,
                 reply_parent_mode=dataset.reply_parent_mode,
                 page_records=dataset.page_records,
                 id_list_specs=dataset.id_list_specs or None,
+                history_url_embedding_dim=dataset.history_url_embedding_dim,
                 alloc=dataset._alloc,
             )
 

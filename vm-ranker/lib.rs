@@ -8,3 +8,4 @@ pub mod params;
 pub mod ranker_service;
 pub mod ranking_config;
 pub mod scoring;
+pub mod user_debias_store;

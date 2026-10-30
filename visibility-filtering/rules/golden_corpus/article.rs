@@ -1,17 +1,16 @@
-use super::builders::{on_client, tweet_candidate, viewer_with_age};
-use super::{Role, Row};
+use super::{Role, Row, Subject};
 use crate::hydration::Hydrator;
 use crate::models::{
     ArticleLifecycle, NsfwViewerDropReason, PostCandidate, SafetyLabelType, Verdict, Viewer,
     ViewerAge,
 };
 use crate::rules::fixtures::{
-    allow, author_viewer, blurred, candidate, dropped, nsfw_viewer_dropped,
-    sensitive_opt_in_viewer, AUTHOR_ID,
+    allow, author_viewer, blurred, candidate, dropped, nsfw_viewer_dropped, on_client,
+    sensitive_opt_in_viewer, tweet_candidate, viewer_with_age, AUTHOR_ID,
 };
 use crate::rules::SafetyLevel::{
-    self, ImmersiveExpandedRecommendations, TimelineHome, TimelineHomeHydration,
-    TimelineHomeRecommendations,
+    self, FilterAll, ImmersiveExpandedRecommendations, NotificationsFollow, NotificationsWriterV2,
+    QuotedTweetRules, TimelineHome, TimelineHomeHydration, TimelineHomeRecommendations,
 };
 use std::num::NonZeroU64;
 use xai_visibility_filtering::models::FilteredReason;
@@ -47,27 +46,27 @@ pub(super) fn rows() -> Vec<Row> {
     let mut rows = vec![
         Row {
             name: "article_draft",
-            post: article_post(Some(ArticleLifecycle::Draft)),
+            subject: Subject::Post(article_post(Some(ArticleLifecycle::Draft))),
             expect: home_hydration_only(unpublished),
         },
         Row {
             name: "article_soft_deleted",
-            post: article_post(Some(ArticleLifecycle::SoftDeleted)),
+            subject: Subject::Post(article_post(Some(ArticleLifecycle::SoftDeleted))),
             expect: home_hydration_only(unpublished),
         },
         Row {
             name: "article_without_lifecycle",
-            post: article_post(None),
+            subject: Subject::Post(article_post(None)),
             expect: home_hydration_only(unpublished),
         },
         Row {
             name: "article_published",
-            post: article_post(Some(ArticleLifecycle::Published)),
+            subject: Subject::Post(article_post(Some(ArticleLifecycle::Published))),
             expect: home_hydration_only(allow),
         },
         Row {
             name: "no_article",
-            post: tweet_candidate(|_| {}),
+            subject: Subject::Post(tweet_candidate(|_| {})),
             expect: home_hydration_only(allow),
         },
     ];
@@ -79,7 +78,7 @@ pub(super) fn rows() -> Vec<Row> {
         ("unflagged_article_body", true, false, false, false),
     ] {
         let mut post = article_post(Some(ArticleLifecycle::Published));
-        post.author.is_nsfw_user = flagged;
+        post.author.features.is_nsfw_user = flagged;
         post.post.tweet_features.nsfw.user = flagged;
         post.post.article_has_media_entities = body;
         post.post.article_has_cover_media = cover;
@@ -95,12 +94,26 @@ pub(super) fn rows() -> Vec<Row> {
         };
         let mut expect = Vec::new();
         for &level in levels {
+            let restricted = |reason, by| match level {
+                TimelineHomeRecommendations => dropped(
+                    FilteredReason::ContainNsfwMedia,
+                    "nsfw_user_author/drop/nsfw_media",
+                ),
+                ImmersiveExpandedRecommendations => dropped(
+                    FilteredReason::ContainNsfwMedia,
+                    "nsfw_sensitive_viewer_user/drop/nsfw_media",
+                ),
+                FilterAll | TimelineHome | TimelineHomeHydration => nsfw_viewer_dropped(reason, by),
+                QuotedTweetRules | NotificationsFollow | NotificationsWriterV2 => {
+                    unreachable!("a user-only level judges no post")
+                }
+            };
             expect.extend([
                 (
                     level,
                     Role::As("underage", viewer_with_age(ViewerAge::Known(17))),
                     if restricts {
-                        nsfw_viewer_dropped(
+                        restricted(
                             NsfwViewerDropReason::IsUnderage,
                             "sensitive_viewer_underage/drop",
                         )
@@ -115,7 +128,7 @@ pub(super) fn rows() -> Vec<Row> {
                         on_client("web", "de", viewer_with_age(ViewerAge::NotStated)),
                     ),
                     if restricts {
-                        nsfw_viewer_dropped(
+                        restricted(
                             NsfwViewerDropReason::HasNoStatedAge,
                             "sensitive_viewer_no_stated_age/drop",
                         )
@@ -127,7 +140,7 @@ pub(super) fn rows() -> Vec<Row> {
                     level,
                     Role::LoggedOut,
                     if restricts {
-                        nsfw_viewer_dropped(
+                        restricted(
                             NsfwViewerDropReason::LoggedOut,
                             "sensitive_viewer_logged_out/drop",
                         )
@@ -213,7 +226,7 @@ pub(super) fn rows() -> Vec<Row> {
                     if flagged {
                         dropped(
                             FilteredReason::ContainNsfwMedia,
-                            "nsfw_sensitive_viewer_tweet/drop/nsfw_media",
+                            "nsfw_sensitive_viewer_user/drop/nsfw_media",
                         )
                     } else {
                         allow()
@@ -227,7 +240,11 @@ pub(super) fn rows() -> Vec<Row> {
                 (ImmersiveExpandedRecommendations, Role::Author, allow()),
             ]);
         }
-        rows.push(Row { name, post, expect });
+        rows.push(Row {
+            name,
+            subject: Subject::Post(post),
+            expect,
+        });
     }
     let mut creator = candidate()
         .with_label(SafetyLabelType::NSFW_HIGH_PRECISION)
@@ -239,7 +256,7 @@ pub(super) fn rows() -> Vec<Row> {
     creator.post.article_has_media_entities = true;
     rows.push(Row {
         name: "exclusive_nsfw_article_body_super_followed",
-        post: creator,
+        subject: Subject::Post(creator),
         expect: vec![
             (
                 TimelineHomeHydration,

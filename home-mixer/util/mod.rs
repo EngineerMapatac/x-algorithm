@@ -9,6 +9,7 @@ pub mod popular_posts;
 pub mod post_engagers;
 pub mod rescore;
 pub mod shadow;
+pub mod shadow_scores;
 pub mod strato_context;
 pub mod string_case;
 pub mod tweet_type_metrics;

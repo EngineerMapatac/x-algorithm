@@ -1,13 +1,12 @@
-use super::builders::{controlled_root, on_client};
-use super::{Role, Row};
+use super::{Role, Row, Subject};
 use crate::hydration::Hydrator::OutsideNarrowcastPlace;
 use crate::hydration::{Hydrator, Hydrators};
 use crate::models::{
     ConversationControlFeatures, LimitedEngagementReason, SafetyLabelType, TweetFeatures,
 };
 use crate::rules::fixtures::{
-    allow, blurred, blurred_and_limited, candidate, conversation_control, limited, limited_for,
-    viewer, CandidateBuilder, VIEWER_ID,
+    allow, blurred, blurred_and_limited, candidate, controlled_root, conversation_control, limited,
+    limited_for, on_client, viewer, CandidateBuilder, VIEWER_ID,
 };
 use crate::rules::SafetyLevel::{TimelineHome, TimelineHomeHydration};
 use xai_core_entities::entities::ConversationControl;
@@ -28,7 +27,7 @@ pub(super) fn rows() -> Vec<Row> {
     vec![
         Row {
             name: "local_post_viewer_outside_place",
-            post: local_post().with_edge(OutsideNarrowcastPlace).build(),
+            subject: Subject::Post(local_post().with_edge(OutsideNarrowcastPlace).build()),
             expect: vec![
                 hydration(Role::NonFollower, local()),
                 hydration(Role::Author, allow()),
@@ -38,67 +37,75 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "local_post_viewer_in_place",
-            post: local_post().build(),
+            subject: Subject::Post(local_post().build()),
             expect: vec![hydration(Role::NonFollower, allow())],
         },
         Row {
             name: "local_post_invited_viewer",
-            post: local_post()
-                .with_edge(OutsideNarrowcastPlace)
-                .with_conversation_control(ConversationControlFeatures {
-                    control: ConversationControl {
-                        invited_user_ids: vec![VIEWER_ID],
-                        ..controlled_root(Local).control
-                    },
-                    ..controlled_root(Local)
-                })
-                .build(),
+            subject: Subject::Post(
+                local_post()
+                    .with_edge(OutsideNarrowcastPlace)
+                    .with_conversation_control(ConversationControlFeatures {
+                        control: ConversationControl {
+                            invited_user_ids: vec![VIEWER_ID],
+                            ..controlled_root(Local).control
+                        },
+                        ..controlled_root(Local)
+                    })
+                    .build(),
+            ),
             expect: vec![hydration(Role::NonFollower, allow())],
         },
         Row {
             name: "local_reply_author_outside_place",
-            post: local_post()
-                .with_edge(OutsideNarrowcastPlace)
-                .with_conversation_control(conversation_control(Local, REPLY_ROOT_AUTHOR_ID))
-                .build(),
+            subject: Subject::Post(
+                local_post()
+                    .with_edge(OutsideNarrowcastPlace)
+                    .with_conversation_control(conversation_control(Local, REPLY_ROOT_AUTHOR_ID))
+                    .build(),
+            ),
             expect: vec![hydration(Role::Author, local())],
         },
         Row {
             name: "local_control_without_place",
-            post: candidate()
-                .with_edge(OutsideNarrowcastPlace)
-                .with_conversation_control(controlled_root(Local))
-                .build(),
+            subject: Subject::Post(
+                candidate()
+                    .with_edge(OutsideNarrowcastPlace)
+                    .with_conversation_control(controlled_root(Local))
+                    .build(),
+            ),
             expect: vec![hydration(Role::NonFollower, allow())],
         },
         Row {
             name: "local_post_location_lookup_failed",
-            post: {
+            subject: Subject::Post({
                 let mut candidate = local_post().build();
                 candidate.failed = Hydrators::of(OutsideNarrowcastPlace);
                 candidate
-            },
+            }),
             expect: vec![hydration(Role::NonFollower, allow())],
         },
         Row {
             name: "local_post_conversation_control_failed",
-            post: {
+            subject: Subject::Post({
                 let mut candidate = candidate()
                     .with_tweet_features(local_place())
                     .with_edge(OutsideNarrowcastPlace)
                     .build();
                 candidate.failed = Hydrators::of(Hydrator::ConversationControl);
                 candidate
-            },
+            }),
             expect: vec![hydration(Role::Author, local())],
         },
         Row {
             name: "nsfw_local_post",
-            post: local_post()
-                .with_label(SafetyLabelType::NSFW_HIGH_PRECISION)
-                .with_media()
-                .with_edge(OutsideNarrowcastPlace)
-                .build(),
+            subject: Subject::Post(
+                local_post()
+                    .with_label(SafetyLabelType::NSFW_HIGH_PRECISION)
+                    .with_media()
+                    .with_edge(OutsideNarrowcastPlace)
+                    .build(),
+            ),
             expect: vec![hydration(
                 Role::As("web_in_us", on_client("web", "us", viewer(VIEWER_ID))),
                 blurred_and_limited(
@@ -112,10 +119,12 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "local_post_under_by_invitation_control",
-            post: local_post()
-                .with_edge(OutsideNarrowcastPlace)
-                .with_conversation_control(controlled_root(ByInvitation))
-                .build(),
+            subject: Subject::Post(
+                local_post()
+                    .with_edge(OutsideNarrowcastPlace)
+                    .with_conversation_control(controlled_root(ByInvitation))
+                    .build(),
+            ),
             expect: vec![hydration(
                 Role::NonFollower,
                 limited_for(

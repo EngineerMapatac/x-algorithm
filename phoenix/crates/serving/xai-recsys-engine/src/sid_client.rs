@@ -17,7 +17,7 @@ use xai_recsys_proto as pb;
 use xai_recsys_sid_proto::{LookupSidsRequest, sid_lookup_service_client::SidLookupServiceClient};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
-const NUM_CHANNELS: usize = 2;
+const PY_NUM_CHANNELS: usize = 2;
 const CACHE_MAX_BYTES: u64 = 256 * 1024 * 1024;
 const CACHE_TTL: Duration = Duration::from_secs(6 * 3600);
 const CACHE_ENTRY_OVERHEAD_BYTES: u32 = 96;
@@ -58,7 +58,7 @@ pub struct SemanticIdClient {
 }
 
 impl SemanticIdClient {
-    fn new(endpoint: &str, sid_num_levels: usize) -> Self {
+    pub fn new(endpoint: &str, sid_num_levels: usize, num_channels: usize) -> Self {
         let endpoint = Endpoint::from_shared(endpoint.to_string())
             .expect("invalid SID endpoint URL")
             .timeout(REQUEST_TIMEOUT)
@@ -66,7 +66,7 @@ impl SemanticIdClient {
             .http2_keep_alive_interval(Duration::from_secs(30))
             .keep_alive_timeout(Duration::from_secs(20))
             .keep_alive_while_idle(true);
-        let clients = (0..NUM_CHANNELS)
+        let clients = (0..num_channels.max(1))
             .map(|_| SidLookupServiceClient::new(endpoint.connect_lazy()))
             .collect();
         Self {
@@ -241,7 +241,7 @@ pub struct PySemanticIdClient {
 
 impl PySemanticIdClient {
     pub fn build(&self) -> SemanticIdClient {
-        SemanticIdClient::new(&self.endpoint, self.sid_num_levels)
+        SemanticIdClient::new(&self.endpoint, self.sid_num_levels, PY_NUM_CHANNELS)
     }
 }
 

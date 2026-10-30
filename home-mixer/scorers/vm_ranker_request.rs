@@ -10,6 +10,7 @@ const DPP_VALUE_MODEL_ID: &str = "dpp";
 pub(crate) struct RequestShape {
     debias: bool,
     pacing: bool,
+    history_topics: bool,
 }
 
 impl RequestShape {
@@ -17,6 +18,8 @@ impl RequestShape {
         Self {
             debias: !query.has_cached_posts && query.params.get(VMRankerSendDebiasInputs),
             pacing: query.params.get(VMRankerSendPacingInputs),
+            history_topics: query.params.get(VMRankerSendHistoryTopics)
+                && query.history_topics.is_some(),
         }
     }
 
@@ -40,8 +43,9 @@ impl RequestShape {
             topic_request: query.is_topic_request(),
             ..Default::default()
         };
-        if self.debias {
-            request.experiment_payload = request_payload(query, candidates).into();
+        if self.debias || self.history_topics {
+            request.experiment_payload =
+                request_payload(query, candidates, self.debias, self.history_topics).into();
         }
         request
     }
@@ -114,7 +118,7 @@ fn phoenix_scores_proto(s: &PhoenixScores) -> pb::PhoenixScores {
         open_link_score: s.open_link_score,
         quoted_vqv_score: s.quoted_vqv_score,
         post_unexplored_score: s.post_unexplored_score,
-        react_with_video_score: s.react_with_video_score,
+        post_video_score: s.post_video_score,
         home_video_continuation_secs: s.home_video_continuation_secs,
         home_profile_visit_secs: s.home_profile_visit_secs,
     }

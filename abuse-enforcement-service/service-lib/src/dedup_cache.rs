@@ -12,6 +12,7 @@ pub(crate) const CLASS_NONE: u8 = 0;
 pub(crate) const CLASS_LABEL: u8 = 1;
 pub(crate) const CLASS_CHALLENGE: u8 = 2;
 pub(crate) const CLASS_SUSPEND: u8 = 3;
+pub(crate) const CLASS_SUSPEND_PERMANENT: u8 = 4;
 
 pub(crate) fn is_duplicate(incoming_class: u8, held: &HeldMeta) -> bool {
     incoming_class <= held.class
@@ -35,7 +36,7 @@ pub(crate) fn held_entry_meta(raw: &[u8]) -> HeldMeta {
     let json_bytes = zstd::decode_all(raw).unwrap_or_else(|_| raw.to_vec());
     let Ok(v) = serde_json::from_slice::<serde_json::Value>(&json_bytes) else {
         return HeldMeta {
-            class: CLASS_SUSPEND,
+            class: CLASS_SUSPEND_PERMANENT,
             kind: HeldKind::Outcome,
             nonce: None,
             displaced: None,
@@ -55,12 +56,12 @@ pub(crate) fn held_entry_meta(raw: &[u8]) -> HeldMeta {
         _ => None,
     };
     let class = if let Some(c) = v.get("acted_class").and_then(serde_json::Value::as_u64) {
-        c.min(CLASS_SUSPEND as u64) as u8
+        c.min(CLASS_SUSPEND_PERMANENT as u64) as u8
     } else {
         match v.get("status").and_then(serde_json::Value::as_str) {
-            Some("success") => CLASS_SUSPEND,
+            Some("success") => CLASS_SUSPEND_PERMANENT,
             Some(_) => CLASS_NONE,
-            None => CLASS_SUSPEND,
+            None => CLASS_SUSPEND_PERMANENT,
         }
     };
     HeldMeta {
@@ -422,7 +423,7 @@ impl ManhattanDedupCache {
         claim_nonce: Option<u64>,
     ) {
         let pkey = Self::pkey(entity_type, entity_id);
-        if acted_class < CLASS_SUSPEND {
+        if acted_class < CLASS_SUSPEND_PERMANENT {
             match self.slot_view(&pkey).await {
                 SlotView::Held(meta) => {
                     let now = now_secs();
@@ -808,7 +809,13 @@ mod tests {
 
     #[test]
     fn held_class_reads_acted_class_field() {
-        for class in [CLASS_NONE, CLASS_LABEL, CLASS_CHALLENGE, CLASS_SUSPEND] {
+        for class in [
+            CLASS_NONE,
+            CLASS_LABEL,
+            CLASS_CHALLENGE,
+            CLASS_SUSPEND,
+            CLASS_SUSPEND_PERMANENT,
+        ] {
             let entry = serde_json::json!({ "status": "success", "acted_class": class });
             assert_eq!(held_action_class(&zstd_json(entry.clone())), class);
             assert_eq!(held_action_class(entry.to_string().as_bytes()), class);
@@ -816,7 +823,7 @@ mod tests {
         let entry = serde_json::json!({ "acted_class": 200 });
         assert_eq!(
             held_action_class(entry.to_string().as_bytes()),
-            CLASS_SUSPEND
+            CLASS_SUSPEND_PERMANENT
         );
         let claim = serde_json::json!({ "ts": 1, "acted_class": CLASS_LABEL });
         assert_eq!(held_action_class(claim.to_string().as_bytes()), CLASS_LABEL);
@@ -825,7 +832,10 @@ mod tests {
     #[test]
     fn held_class_legacy_entries() {
         let legacy_success = serde_json::json!({ "status": "success", "topic": "t" });
-        assert_eq!(held_action_class(&zstd_json(legacy_success)), CLASS_SUSPEND);
+        assert_eq!(
+            held_action_class(&zstd_json(legacy_success)),
+            CLASS_SUSPEND_PERMANENT
+        );
         let legacy_skip = serde_json::json!({ "status": "dedup_skipped" });
         assert_eq!(held_action_class(&zstd_json(legacy_skip)), CLASS_NONE);
         let legacy_dry = serde_json::json!({ "status": "dry_run" });
@@ -833,9 +843,9 @@ mod tests {
         let legacy_claim = serde_json::json!({ "ts": 12345 });
         assert_eq!(
             held_action_class(legacy_claim.to_string().as_bytes()),
-            CLASS_SUSPEND
+            CLASS_SUSPEND_PERMANENT
         );
-        assert_eq!(held_action_class(b"\x02not json"), CLASS_SUSPEND);
+        assert_eq!(held_action_class(b"\x02not json"), CLASS_SUSPEND_PERMANENT);
     }
 
     #[test]
@@ -851,7 +861,7 @@ mod tests {
         let meta = held_entry_meta(legacy_claim.to_string().as_bytes());
         assert_eq!(
             (meta.class, meta.kind),
-            (CLASS_SUSPEND, HeldKind::Placeholder)
+            (CLASS_SUSPEND_PERMANENT, HeldKind::Placeholder)
         );
         assert_eq!(meta.nonce, None);
         let acted = serde_json::json!({ "status": "success", "acted_class": CLASS_LABEL });
@@ -859,12 +869,18 @@ mod tests {
         assert_eq!((meta.class, meta.kind), (CLASS_LABEL, HeldKind::Outcome));
         let legacy_success = serde_json::json!({ "status": "success" });
         let meta = held_entry_meta(&zstd_json(legacy_success));
-        assert_eq!((meta.class, meta.kind), (CLASS_SUSPEND, HeldKind::Outcome));
+        assert_eq!(
+            (meta.class, meta.kind),
+            (CLASS_SUSPEND_PERMANENT, HeldKind::Outcome)
+        );
         let legacy_skip = serde_json::json!({ "status": "high_follower_count" });
         let meta = held_entry_meta(&zstd_json(legacy_skip));
         assert_eq!((meta.class, meta.kind), (CLASS_NONE, HeldKind::Outcome));
         let meta = held_entry_meta(b"\x02not json");
-        assert_eq!((meta.class, meta.kind), (CLASS_SUSPEND, HeldKind::Outcome));
+        assert_eq!(
+            (meta.class, meta.kind),
+            (CLASS_SUSPEND_PERMANENT, HeldKind::Outcome)
+        );
     }
 
     #[test]

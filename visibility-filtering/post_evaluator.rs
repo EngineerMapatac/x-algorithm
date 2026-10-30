@@ -1,60 +1,92 @@
 use crate::hydration::fallback_cache::FallbackCaches;
 use crate::hydration::sources::Sources;
-use crate::hydration::{Cause, HydratedTweet, Hydration, HydrationRequest, Lookup, Unresolved};
-use crate::metrics::{self as ft_metrics, RetweetSources, Rpc, Stage};
-use crate::models::{ClientCapability, Evaluation, RawCandidate, TweetId};
-use crate::rules::engine::AdmittedPosts;
+use crate::hydration::{
+    Cause, HydratedTweet, Hydration, HydrationRequest, Lookup, QuoteEntry, Relation, Unresolved,
+};
+use crate::metrics::{self as ft_metrics, Metrics, RequestMetrics, RetweetSources, Stage};
+use crate::models::{
+    ClientCapability, Evaluation, EvaluationKey, PlacedCandidate, Placement, RequestViewer,
+    RetweetMerge, TweetId,
+};
+use crate::rules::engine::Admitted;
 use crate::rules::{NoTrace, PolicyTrace, RuleEngine, SafetyLevel};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::warn;
 use xai_visibility_filtering_proto as vf_pb;
 
+mod author;
+mod notification;
+mod retweet;
+
+pub(crate) use author::AuthorJudgement;
+pub(crate) use retweet::hydrate_and_trace;
+pub use retweet::MergeSelection;
+
 pub struct PostBatch {
-    pub viewer_id: Option<u64>,
-    pub country_code: Option<String>,
+    pub(crate) viewer: RequestViewer,
     pub client_capability: ClientCapability,
     pub safety_level: SafetyLevel,
-    pub candidates: Vec<RawCandidate>,
-    pub rpc: Rpc,
+    pub candidates: Vec<PlacedCandidate>,
+    pub retweet_merge: RetweetMerge,
 }
 
 impl PostBatch {
     pub(crate) fn hydration_request<'a>(
-        &'a mut self,
-        is_expanding_retweet_sources: bool,
+        &self,
         fallback_caches: &'a FallbackCaches,
+        metrics: &'a RequestMetrics,
     ) -> HydrationRequest<'a> {
         HydrationRequest::new(
-            self.viewer_id,
-            self.country_code.take(),
+            self.viewer.id(),
+            self.viewer.country_code().map(str::to_owned),
             self.client_capability,
-            &self.candidates,
+            self.candidates
+                .iter()
+                .map(|placed| placed.candidate)
+                .collect(),
+            self.retweet_merge,
             fallback_caches,
+            metrics,
         )
-        .with_retweet_sources(is_expanding_retweet_sources)
+        .with_quotes(
+            self.candidates
+                .iter()
+                .filter_map(|placed| match placed.placement {
+                    Placement::InnerQuoted { outer } => Some(QuoteEntry {
+                        inner: placed.tweet_id(),
+                        outer,
+                    }),
+                    Placement::Standalone | Placement::RetweetSource => None,
+                })
+                .collect(),
+        )
     }
 }
 
 #[derive(Clone)]
 pub struct PostEvaluation {
     pub tweet_id: TweetId,
+    pub placement: Placement,
     pub source_tweet_id: Option<TweetId>,
     pub evaluation: Evaluation,
-    pub safety_labels: Option<vf_pb::SafetyLabelMap>,
+    pub safety_labels: Option<Arc<vf_pb::SafetyLabelMap>>,
 }
 
-pub struct PostEvaluations {
-    pub outcomes: Vec<PostEvaluation>,
+impl PostEvaluation {
+    pub fn key(&self) -> EvaluationKey {
+        EvaluationKey {
+            tweet_id: self.tweet_id,
+            placement: self.placement,
+        }
+    }
 }
 
 pub struct PostEvaluator {
     sources: Arc<dyn Sources>,
     rule_engine: RuleEngine,
     fallback_caches: Arc<FallbackCaches>,
-    #[cfg(test)]
-    pub(crate) client_capabilities: std::sync::Mutex<Vec<ClientCapability>>,
+    metrics: Metrics,
 }
 
 impl PostEvaluator {
@@ -62,57 +94,56 @@ impl PostEvaluator {
         sources: Arc<dyn Sources>,
         rule_engine: RuleEngine,
         fallback_caches: Arc<FallbackCaches>,
+        metrics: Metrics,
     ) -> Self {
         Self {
             sources,
             rule_engine,
             fallback_caches,
-            #[cfg(test)]
-            client_capabilities: std::sync::Mutex::default(),
+            metrics,
         }
     }
 
-    pub async fn run(&self, request: PostBatch) -> PostEvaluations {
-        let hydrated = self.hydrate(request).await;
-        PostEvaluations {
-            outcomes: self.evaluate_in_request_order(&hydrated, &mut NoTrace),
-        }
+    pub(crate) fn rule_engine(&self) -> &RuleEngine {
+        &self.rule_engine
     }
 
-    pub(crate) async fn hydrate(&self, request: PostBatch) -> HydratedRequest {
-        self.hydrate_request(request, false).await
+    pub(crate) fn metrics(&self) -> &Metrics {
+        &self.metrics
     }
 
-    pub(crate) async fn hydrate_with_retweet_sources(&self, request: PostBatch) -> HydratedRequest {
-        self.hydrate_request(request, true).await
-    }
-
-    async fn hydrate_request(
+    pub(crate) async fn run<O: PostObserver>(
         &self,
-        mut request: PostBatch,
-        is_expanding_retweet_sources: bool,
-    ) -> HydratedRequest {
-        #[cfg(test)]
-        self.client_capabilities
-            .lock()
-            .unwrap()
-            .push(request.client_capability);
+        request: PostBatch,
+        metrics: &RequestMetrics,
+        observer: &mut O,
+    ) -> (HydratedRequest, Vec<PostEvaluation>) {
+        let retweet_merge = request.retweet_merge;
+        let hydrated = self.hydrate(request, metrics).await;
+        let outcomes = match retweet_merge {
+            RetweetMerge::Unmerged => self.evaluate_in_request_order(&hydrated, observer),
+            RetweetMerge::Merged => retweet::merge_sources(self, &hydrated, observer),
+        };
+        (hydrated, outcomes)
+    }
+
+    async fn hydrate(&self, request: PostBatch, metrics: &RequestMetrics) -> HydratedRequest {
         let started = Instant::now();
         let plan = self.rule_engine.plan(request.safety_level);
         let hydration = plan
             .hydrate(
                 &*self.sources,
-                request.hydration_request(is_expanding_retweet_sources, &self.fallback_caches),
+                request.hydration_request(&self.fallback_caches, metrics),
             )
             .await;
         let hydrated_at = Instant::now();
-        let retweet_sources = if !is_expanding_retweet_sources {
+        let retweet_sources = if !hydration.is_on(Relation::RetweetSource) {
             RetweetSources::NoSource
-        } else if hydration.has_fetched_sources() {
+        } else if hydration.has_fetched_retweet_sources() {
             RetweetSources::Fetched
         } else if request.candidates.iter().any(|candidate| {
             hydration
-                .tweet(candidate.tweet_id)
+                .tweet(candidate.tweet_id())
                 .is_some_and(|tweet| tweet.source_to_merge().is_some())
         }) {
             RetweetSources::InBatch
@@ -120,14 +151,14 @@ impl PostEvaluator {
             RetweetSources::NoSource
         };
         ft_metrics::record_phase(
-            request.rpc,
+            metrics,
             Stage::Hydration,
             retweet_sources,
             hydrated_at - started,
         );
         HydratedRequest {
             safety_level: request.safety_level,
-            rpc: request.rpc,
+            metrics: metrics.clone(),
             retweet_sources,
             candidates: request.candidates,
             hydration,
@@ -140,13 +171,15 @@ impl PostEvaluator {
         observer: &mut O,
     ) -> Vec<PostEvaluation> {
         let evaluating = Instant::now();
-        let admitted = self.admit(hydrated);
+        let admitted = self
+            .rule_engine
+            .admit(hydrated.safety_level, &hydrated.hydration);
         let outcomes = hydrated
-            .requested_ids()
-            .map(|tweet_id| Self::outcome(hydrated, admitted.as_ref(), tweet_id, false, observer))
+            .candidates()
+            .map(|candidate| Self::outcome(hydrated, admitted.as_ref(), candidate.key(), observer))
             .collect();
         ft_metrics::record_phase(
-            hydrated.rpc,
+            &hydrated.metrics,
             Stage::PostHydration,
             hydrated.retweet_sources,
             evaluating.elapsed(),
@@ -157,26 +190,21 @@ impl PostEvaluator {
     pub(crate) fn evaluate<O: PostObserver>(
         &self,
         hydrated: &HydratedRequest,
-        ids: impl IntoIterator<Item = TweetId>,
-        copied: impl Fn(TweetId) -> bool,
+        keys: impl IntoIterator<Item = EvaluationKey>,
         observer: &mut O,
-    ) -> HashMap<TweetId, PostEvaluation> {
+    ) -> HashMap<EvaluationKey, PostEvaluation> {
         let evaluating = Instant::now();
-        let admitted = self.admit(hydrated);
+        let admitted = self
+            .rule_engine
+            .admit(hydrated.safety_level, &hydrated.hydration);
         let mut outcomes = HashMap::new();
-        for tweet_id in ids {
-            outcomes.entry(tweet_id).or_insert_with(|| {
-                Self::outcome(
-                    hydrated,
-                    admitted.as_ref(),
-                    tweet_id,
-                    copied(tweet_id),
-                    observer,
-                )
-            });
+        for key in keys {
+            outcomes
+                .entry(key)
+                .or_insert_with(|| Self::outcome(hydrated, admitted.as_ref(), key, observer));
         }
         ft_metrics::record_phase(
-            hydrated.rpc,
+            &hydrated.metrics,
             Stage::PostHydration,
             hydrated.retweet_sources,
             evaluating.elapsed(),
@@ -187,45 +215,39 @@ impl PostEvaluator {
     pub(crate) fn trace(
         &self,
         hydrated: &HydratedRequest,
-        ids: impl IntoIterator<Item = TweetId>,
-        traces: &mut HashMap<TweetId, PolicyTrace>,
+        keys: impl IntoIterator<Item = EvaluationKey>,
+        traces: &mut HashMap<EvaluationKey, PolicyTrace>,
     ) {
-        let admitted = self.admit(hydrated);
-        for tweet_id in ids {
-            if !traces.contains_key(&tweet_id) {
-                Self::outcome(hydrated, admitted.as_ref(), tweet_id, false, traces);
+        let admitted = self
+            .rule_engine
+            .admit(hydrated.safety_level, &hydrated.hydration);
+        for key in keys {
+            if !traces.contains_key(&key) {
+                Self::outcome(hydrated, admitted.as_ref(), key, traces);
             }
         }
     }
 
-    fn admit<'a>(&'a self, hydrated: &'a HydratedRequest) -> Option<AdmittedPosts<'a>> {
-        self.rule_engine
-            .admit(hydrated.safety_level, &hydrated.hydration)
-            .inspect_err(|error| {
-                warn!(
-                    ?error,
-                    level = ?hydrated.safety_level,
-                    "hydration not admitted by its level's policy; failing its candidates"
-                );
-            })
-            .ok()
-    }
-
     fn outcome<O: PostObserver>(
         hydrated: &HydratedRequest,
-        admitted: Option<&AdmittedPosts<'_>>,
-        tweet_id: TweetId,
-        copied: bool,
+        admitted: Option<&Admitted<'_>>,
+        key: EvaluationKey,
         observer: &mut O,
     ) -> PostEvaluation {
+        let EvaluationKey {
+            tweet_id,
+            placement,
+        } = key;
+        let copied = hydrated.hydration.is_on(Relation::RetweetSource)
+            && placement != Placement::RetweetSource;
         let tweet = hydrated.hydration.tweet(tweet_id);
-        let post = admitted.and_then(|admitted| admitted.post(tweet_id, copied));
+        let post = admitted.and_then(|admitted| admitted.post(tweet_id, copied, placement));
         let evaluation = match (tweet, post) {
             (Some(HydratedTweet::Resolved { .. }), Some(post)) => {
                 if O::TOTAL {
                     let trace = post.trace();
                     let evaluation = trace.evaluation.clone();
-                    observer.record(tweet_id, trace);
+                    observer.record(key, trace);
                     evaluation
                 } else {
                     post.evaluate()
@@ -247,11 +269,10 @@ impl PostEvaluator {
         };
         PostEvaluation {
             tweet_id,
+            placement,
             source_tweet_id: tweet.and_then(HydratedTweet::source_tweet_id),
             evaluation,
-            safety_labels: tweet
-                .and_then(HydratedTweet::safety_labels)
-                .map(|labels| vf_pb::SafetyLabelMap::clone(labels)),
+            safety_labels: tweet.and_then(HydratedTweet::safety_labels).cloned(),
         }
     }
 }
@@ -259,29 +280,32 @@ impl PostEvaluator {
 pub(crate) trait PostObserver {
     const TOTAL: bool;
 
-    fn record(&mut self, tweet_id: TweetId, trace: PolicyTrace);
+    fn record(&mut self, key: EvaluationKey, trace: PolicyTrace);
+
+    #[inline]
+    fn select(&mut self, _: EvaluationKey, _: MergeSelection) {}
 }
 
 impl PostObserver for NoTrace {
     const TOTAL: bool = false;
 
     #[inline]
-    fn record(&mut self, _: TweetId, _: PolicyTrace) {}
+    fn record(&mut self, _: EvaluationKey, _: PolicyTrace) {}
 }
 
-impl PostObserver for HashMap<TweetId, PolicyTrace> {
+impl PostObserver for HashMap<EvaluationKey, PolicyTrace> {
     const TOTAL: bool = true;
 
-    fn record(&mut self, tweet_id: TweetId, trace: PolicyTrace) {
-        self.insert(tweet_id, trace);
+    fn record(&mut self, key: EvaluationKey, trace: PolicyTrace) {
+        self.insert(key, trace);
     }
 }
 
 pub(crate) struct HydratedRequest {
     safety_level: SafetyLevel,
-    rpc: Rpc,
+    metrics: RequestMetrics,
     retweet_sources: RetweetSources,
-    candidates: Vec<RawCandidate>,
+    candidates: Vec<PlacedCandidate>,
     hydration: Hydration,
 }
 
@@ -290,13 +314,21 @@ impl HydratedRequest {
         &self.hydration
     }
 
+    pub(crate) fn metrics(&self) -> &RequestMetrics {
+        &self.metrics
+    }
+
     #[cfg(test)]
     pub(crate) fn retweet_sources(&self) -> RetweetSources {
         self.retweet_sources
     }
 
     pub(crate) fn requested_ids(&self) -> impl ExactSizeIterator<Item = TweetId> + '_ {
-        self.candidates.iter().map(|candidate| candidate.tweet_id)
+        self.candidates().map(PlacedCandidate::tweet_id)
+    }
+
+    pub(crate) fn candidates(&self) -> impl ExactSizeIterator<Item = PlacedCandidate> + '_ {
+        self.candidates.iter().copied()
     }
 }
 
@@ -408,13 +440,22 @@ mod tests {
                 ]],
                 "{delayed:?}"
             );
+            let requested = [vec![1, 2, 3, 4, 7, 8, 100, 201]];
             assert_eq!(
-                sources.keys(Source::TesConversationRoot),
+                sources.keys(Source::TesPureCoreData),
+                requested,
+                "{delayed:?}"
+            );
+            assert_eq!(
+                sources.keys((Relation::ConversationRoot, Source::TesPureCoreData)),
                 [vec![500]],
                 "{delayed:?}"
             );
-            let root_keys = logged_out.sources().keys(Source::TesConversationRoot);
-            assert!(root_keys.is_empty(), "{delayed:?}");
+            assert_eq!(
+                logged_out.sources().keys(Source::TesPureCoreData),
+                requested,
+                "{delayed:?}"
+            );
         }
     }
 
@@ -447,10 +488,10 @@ mod tests {
                 Evaluation::Failed(Lookup::Tweet),
             ]
         );
-        assert!(scenario
-            .sources()
-            .keys(Source::TesConversationRoot)
-            .is_empty());
+        assert_eq!(
+            scenario.sources().keys(Source::TesPureCoreData),
+            [vec![1, 2, 100, 200]]
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -487,6 +528,7 @@ mod tests {
             vec![
                 EdgeQuery::reverse(Graph::Follows, followed_by),
                 EdgeQuery::forward(Graph::SuperFollows, vec![]),
+                EdgeQuery::forward(Graph::Follows, vec![]),
                 EdgeQuery::reverse(Graph::Blocks, vec![30]),
             ]
         };
@@ -589,20 +631,20 @@ mod tests {
             let sources = scenario.sources();
             assert_eq!(evaluations, [Evaluation::complete(verdict)], "{name}");
             assert_eq!(sources.selects(), selects, "{name}");
+            assert_eq!(sources.keys(Source::TesPureCoreData), [vec![2]], "{name}");
             assert_eq!(
-                sources.keys(Source::TesConversationRoot),
+                sources.keys((Relation::ConversationRoot, Source::TesPureCoreData)),
                 root_keys,
                 "{name}"
             );
             let starts: Vec<Duration> = sources
-                .starts(Source::TesConversationRoot)
+                .starts((Relation::ConversationRoot, Source::TesPureCoreData))
                 .into_iter()
                 .map(|start| start - started)
                 .collect();
             assert_eq!(starts, root_starts, "{name}");
             for source in [
-                Source::TesPureCoreData,
-                Source::TesTweet,
+                Source::TesTweetForVisibility,
                 Source::TesConversationControl,
                 Source::SafetyLabels,
             ] {
@@ -727,6 +769,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn my_network_posts_limit_viewers_outside_the_root_authors_network_or_its_failed_lookup()
+    {
+        let world = || {
+            InMemorySources::default()
+                .tweet(1, 10)
+                .control(1, control(ConversationControlArm::MyNetwork, 10, &[]))
+                .authors(&[10])
+        };
+        let shown = || Evaluation::complete(allow());
+        let network_limit = || {
+            Evaluation::complete(limited(
+                LimitedEngagementReason::ConversationControl,
+                "limit_replies_my_network/limited_engagement/conversation_control",
+            ))
+        };
+        let home = |sources: InMemorySources| {
+            Scenario::new(sources, SafetyLevel::TimelineHomeHydration).viewer(Some(50))
+        };
+        let raw = [raw(1, None)];
+
+        let second_degree = home(world().second_degree_path(10, 50));
+        assert_eq!(second_degree.evaluate(&raw).await.evaluations(), [shown()]);
+        assert_eq!(second_degree.sources().keys(Source::Wingman), [vec![10]]);
+
+        let followed = home(world().edge(Graph::Follows, 10, 50));
+        assert_eq!(followed.evaluate(&raw).await.evaluations(), [shown()]);
+        assert!(followed.sources().keys(Source::Wingman).is_empty());
+
+        let failed = world()
+            .second_degree_path(10, 50)
+            .fault(Source::Wingman, Fault::Fails);
+        for outside in [world(), failed] {
+            assert_eq!(
+                home(outside).evaluate(&raw).await.evaluations(),
+                [network_limit()]
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn a_circle_row_served_from_the_fallback_cache_still_asks_the_trusted_friends_list() {
         let trusted_friends = |list_id| TweetFeatures {
             trusted_friends_list_id: Some(list_id),
@@ -760,7 +842,7 @@ mod tests {
         assert_eq!(judged().await, expected);
         scenario
             .sources()
-            .break_source(Source::TesTweet, Fault::Fails);
+            .break_source(Source::TesTweetForVisibility, Fault::Fails);
         assert_eq!(judged().await, expected);
         assert_eq!(
             scenario.sources().keys(Source::TrustedFriends),
@@ -840,9 +922,9 @@ mod tests {
         let sources = match tweet_row {
             TweetRow::Found => sources.tweet_features(1, nullcast),
             TweetRow::NotFound => sources.without_tweet_row(1),
-            TweetRow::Failed => sources.fail_key(Source::TesTweet, 1),
+            TweetRow::Failed => sources.fail_key(Source::TesTweetForVisibility, 1),
             TweetRow::FailedCacheHit => {
-                broken.push((Source::TesTweet, Fault::Fails));
+                broken.push((Source::TesTweetForVisibility, Fault::Fails));
                 sources.tweet_features(1, nullcast)
             }
         };
@@ -1086,9 +1168,9 @@ mod tests {
             .unwrap()
             .labels
             .is_empty());
-        assert_eq!(
-            response.outcomes[0].safety_labels,
-            response.outcomes[2].safety_labels
-        );
+        assert!(Arc::ptr_eq(
+            response.outcomes[0].safety_labels.as_ref().unwrap(),
+            response.outcomes[2].safety_labels.as_ref().unwrap()
+        ));
     }
 }

@@ -11,6 +11,7 @@ pub(crate) enum ClientRpc {
     GetSafetyLabels,
     FilterTweets,
     EvaluateTweets,
+    FilterNotifications,
 }
 
 struct Names {
@@ -43,6 +44,13 @@ impl ClientRpc {
                 latency_ms: "vf_client_evaluate_tweets_latency_ms_vm",
                 batch_error: "vf_client_evaluate_tweets_batch_error",
                 batch_latency_ms: "vf_client_evaluate_tweets_batch_latency_ms_vm",
+                failed_ids: None,
+            },
+            Self::FilterNotifications => Names {
+                requests: "vf_client_filter_notifications",
+                latency_ms: "vf_client_filter_notifications_latency_ms_vm",
+                batch_error: "vf_client_filter_notifications_batch_error",
+                batch_latency_ms: "vf_client_filter_notifications_batch_latency_ms_vm",
                 failed_ids: None,
             },
         }

@@ -214,7 +214,7 @@ def packed_prefix_positions(layout: SequencePackedLayout) -> np.ndarray:
 def candidate_region_history_schedule(
     layout: SequencePackedLayout, candidate_seq_len: int, num_user_prefix_tokens: int
 ) -> tuple[np.ndarray, np.ndarray]:
-    assert layout.prefix_positions is not None, "not a candidate-region layout"
+    assert layout.prefix_positions is not None, "not a history and candidate packed layout"
     bs_per_device = layout.cu_seqlens.shape[1] - 1
     cu_seqlens = layout.cu_seqlens - np.arange(bs_per_device + 1) * candidate_seq_len
     padding_mask = layout.padding_mask.copy()
@@ -722,29 +722,27 @@ def _candidate_region_layout(
     assert num_user_prefix_tokens > 0, (
         "history position 0 marks padding, so a prefix token is needed"
     )
-    num_devices, regular_len = layout.segment_ids.shape
+    num_devices, old_len = layout.segment_ids.shape
     bs_per_device = seq_starts.shape[1]
     device_idx = np.arange(num_devices)[:, None]
-    regular_candidate_tokens = layout.candidate_positions
-    slots_per_user = regular_candidate_tokens.shape[1] // bs_per_device
-    valid = layout.segment_ids[device_idx, regular_candidate_tokens] != 0
+    old_candidate_tokens = layout.candidate_positions
+    slots_per_user = old_candidate_tokens.shape[1] // bs_per_device
+    valid = layout.segment_ids[device_idx, old_candidate_tokens] != 0
     history_region_len = int(span_lens[0].sum())
     assert (span_lens.sum(axis=1) == history_region_len).all()
     packed_seq_len = history_region_len + candidate_region_len
 
-    regular_token = np.full((num_devices, packed_seq_len), regular_len, dtype=np.int64)
-    in_history = np.ones((num_devices, regular_len), dtype=bool)
-    in_history[
-        np.broadcast_to(device_idx, regular_candidate_tokens.shape), regular_candidate_tokens
-    ] = False
-    regular_history_tokens = np.nonzero(in_history)[1].reshape(num_devices, history_region_len)
+    old_token = np.full((num_devices, packed_seq_len), old_len, dtype=np.int64)
+    in_history = np.ones((num_devices, old_len), dtype=bool)
+    in_history[device_idx, old_candidate_tokens] = False
+    old_history_tokens = np.nonzero(in_history)[1].reshape(num_devices, history_region_len)
     span_starts = np.cumsum(span_lens, axis=1) - span_lens
     key_counts = np.zeros((num_devices, bs_per_device), dtype=np.int64)
     for d in range(num_devices):
         token_user = np.repeat(np.arange(bs_per_device), span_lens[d])
         offset = np.arange(history_region_len) - span_starts[d][token_user]
         is_prefix = offset < num_user_prefix_tokens
-        is_key = layout.padding_mask[d, regular_history_tokens[d]] | is_prefix
+        is_key = layout.padding_mask[d, old_history_tokens[d]] | is_prefix
         key_counts[d] = np.bincount(token_user[is_key], minlength=bs_per_device)
         user_pad = (span_lens[d] - key_counts[d])[token_user]
         new_offset = np.where(
@@ -754,7 +752,7 @@ def _candidate_region_layout(
                 offset < num_user_prefix_tokens + user_pad, offset - num_user_prefix_tokens, offset
             ),
         )
-        regular_token[d, span_starts[d][token_user] + new_offset] = regular_history_tokens[d]
+        old_token[d, span_starts[d][token_user] + new_offset] = old_history_tokens[d]
 
     counts = valid.reshape(num_devices, bs_per_device, slots_per_user).sum(axis=2)
     candidate_cu_seqlens = np.zeros((num_devices, bs_per_device + 1), dtype=np.int32)
@@ -763,40 +761,38 @@ def _candidate_region_layout(
     rank_in_user = (np.cumsum(valid.reshape(num_devices, bs_per_device, -1), axis=2) - 1).reshape(
         num_devices, -1
     )
-    slot_user = np.arange(regular_candidate_tokens.shape[1]) // slots_per_user
+    slot_user = np.arange(old_candidate_tokens.shape[1]) // slots_per_user
     slot_token = history_region_len + candidate_cu_seqlens[:, slot_user] + rank_in_user
     d_valid, s_valid = np.nonzero(valid)
-    regular_token[d_valid, slot_token[d_valid, s_valid]] = regular_candidate_tokens[
-        d_valid, s_valid
-    ]
+    old_token[d_valid, slot_token[d_valid, s_valid]] = old_candidate_tokens[d_valid, s_valid]
 
-    is_copy = regular_token < regular_len
-    new_token = np.full((num_devices, regular_len), packed_seq_len - 1, dtype=np.int32)
+    is_copy = old_token < old_len
+    new_token = np.full((num_devices, old_len), packed_seq_len - 1, dtype=np.int32)
     d_copy, t_copy = np.nonzero(is_copy)
-    new_token[d_copy, regular_token[d_copy, t_copy]] = t_copy
+    new_token[d_copy, old_token[d_copy, t_copy]] = t_copy
 
-    clamped_regular_token = np.minimum(regular_token, regular_len - 1)
+    clamped_old_token = np.minimum(old_token, old_len - 1)
     segment_ids = np.where(
-        is_copy, np.take_along_axis(layout.segment_ids, clamped_regular_token, axis=1), 0
+        is_copy, np.take_along_axis(layout.segment_ids, clamped_old_token, axis=1), 0
     )
-    positions = np.take_along_axis(layout.positions, clamped_regular_token[:, :, None], axis=1)
+    positions = np.take_along_axis(layout.positions, clamped_old_token[:, :, None], axis=1)
     positions[~is_copy] = 0.0
     padding_mask = segment_ids != 0
 
     history_positions = np.take_along_axis(new_token, layout.history_positions, axis=1)
     candidate_positions = np.where(
-        valid, np.take_along_axis(new_token, regular_candidate_tokens, axis=1), packed_seq_len - 1
+        valid, np.take_along_axis(new_token, old_candidate_tokens, axis=1), packed_seq_len - 1
     ).astype(np.int32)
     prefix_positions = np.take_along_axis(new_token, seq_starts.astype(np.intp), axis=1)
 
     region_token = slot_token[d_valid, s_valid] - history_region_len
-    num_slots = regular_candidate_tokens.shape[1]
+    num_slots = old_candidate_tokens.shape[1]
     candidate_token_to_slot = np.full(
         (num_devices, candidate_region_len), num_slots, dtype=np.int32
     )
     candidate_token_to_slot[d_valid, region_token] = s_valid
     candidate_slot_to_token = np.full(
-        regular_candidate_tokens.shape, candidate_region_len, dtype=np.int32
+        old_candidate_tokens.shape, candidate_region_len, dtype=np.int32
     )
     candidate_slot_to_token[d_valid, s_valid] = region_token
 

@@ -1,7 +1,8 @@
-use super::builders::{labeled, read_only_viewer};
-use super::{Role, Row};
+use super::{Role, Row, Subject};
 use crate::models::{LimitedEngagementReason, SafetyLabelType};
-use crate::rules::fixtures::{allow, candidate, dropped, limited, AUTHOR_ID, VIEWER_ID};
+use crate::rules::fixtures::{
+    allow, candidate, dropped, labeled, limited, read_only_viewer, AUTHOR_ID, VIEWER_ID,
+};
 use crate::rules::SafetyLevel::{
     FilterAll, TimelineHome, TimelineHomeHydration, TimelineHomeRecommendations,
 };
@@ -11,7 +12,7 @@ pub(super) fn rows() -> Vec<Row> {
     vec![
         Row {
             name: "pristine",
-            post: candidate().build(),
+            subject: Subject::Post(candidate().build()),
             expect: vec![
                 (
                     FilterAll,
@@ -52,7 +53,7 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "egregious_nsfw_label",
-            post: labeled(SafetyLabelType::EGREGIOUS_NSFW),
+            subject: Subject::Post(labeled(SafetyLabelType::EGREGIOUS_NSFW)),
             expect: vec![
                 (TimelineHome, Role::NonFollower, allow()),
                 (TimelineHomeRecommendations, Role::NonFollower, allow()),

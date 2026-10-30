@@ -2,12 +2,16 @@ use crate::models::candidate::CandidateHelpers;
 use crate::models::candidate::PostCandidate;
 use crate::models::query::ScoredPostsQuery;
 use crate::params::{
-    EnableHomeExcursionScores, PhoenixInferenceClusterId, PhoenixRankerNewUserHistoryThreshold,
-    PhoenixRankerNewUserInferenceClusterId, RerankerHeadTag,
+    EnableHomeExcursionScores, EnablePageDecodeRerank, PhoenixInferenceClusterId,
+    PhoenixRankerNewUserHistoryThreshold, PhoenixRankerNewUserInferenceClusterId, RerankerHeadTag,
+};
+use crate::scorers::page_decode_rerank_scorer::{
+    page_decode_params, record_decode_picks_returned, record_decode_request_sent,
 };
 use crate::util::egress::PredictionDispatch;
 use crate::util::phoenix_request::build_prediction_request;
 use crate::util::post_engagers::record_sent_post_engagers;
+use std::collections::HashMap;
 use tonic::async_trait;
 use xai_candidate_pipeline::component_library::clients::phoenix_prediction_client::{
     PhoenixCluster, PredictNextActions,
@@ -95,12 +99,17 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for PhoenixScorer {
 
         let cluster = Self::resolve_cluster(query);
         let serve_time_ms = last_scored_at_ms.map_or(query.request_time_ms, |ms| ms as i64);
-        let request = build_prediction_request(query, candidates, product_surface, serve_time_ms);
+        let mut request =
+            build_prediction_request(query, candidates, product_surface, serve_time_ms);
         record_sent_post_engagers(candidates, &request.candidate_sets[0].candidates);
+        if query.params.get(EnablePageDecodeRerank) {
+            request.page_decode = Some(page_decode_params(query));
+            record_decode_request_sent();
+        }
 
         let predictions = self
             .dispatch
-            .predict_with_fallback(query, cluster, request)
+            .predict(query, cluster, request)
             .await
             .map_err(|e| format!("Phoenix prediction failed: {}", e));
 
@@ -109,23 +118,39 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for PhoenixScorer {
             Err(err) => return vec![Err(err); candidates.len()],
         };
 
+        let page_decode_picks = predictions.page_decode_picks();
+        if query.params.get(EnablePageDecodeRerank) {
+            record_decode_picks_returned(page_decode_picks.len());
+        }
+        let decode_slots: HashMap<u64, (u32, f64)> = page_decode_picks
+            .iter()
+            .enumerate()
+            .map(|(slot, pick)| (pick.tweet_id, (slot as u32, pick.prob)))
+            .collect();
+
         let home_excursion_scores = query.params.get(EnableHomeExcursionScores);
         candidates
             .iter()
-            .map(|c| PostCandidate {
-                phoenix_scores: if home_excursion_scores {
-                    with_home_excursion_heads(&predictions, c.get_original_tweet_id())
-                } else {
-                    predictions.candidate_scores(&c.get_original_tweet_id())
-                },
-                backbone_scores: predictions.candidate_backbone_scores(&c.get_original_tweet_id()),
-                served_slate_context: predictions
-                    .candidate_slate_context(&c.get_original_tweet_id())
-                    .map(Into::into),
-                prediction_request_id: Some(query.prediction_id),
-                last_scored_at_ms,
-                reranker_head_tag: Some(query.params.get(RerankerHeadTag) as u32),
-                ..Default::default()
+            .map(|c| {
+                let decode_slot = decode_slots.get(&c.get_original_tweet_id());
+                PostCandidate {
+                    phoenix_scores: if home_excursion_scores {
+                        with_home_excursion_heads(&predictions, c.get_original_tweet_id())
+                    } else {
+                        predictions.candidate_scores(&c.get_original_tweet_id())
+                    },
+                    backbone_scores: predictions
+                        .candidate_backbone_scores(&c.get_original_tweet_id()),
+                    served_slate_context: predictions
+                        .candidate_slate_context(&c.get_original_tweet_id())
+                        .map(Into::into),
+                    prediction_request_id: Some(query.prediction_id),
+                    last_scored_at_ms,
+                    reranker_head_tag: Some(query.params.get(RerankerHeadTag) as u32),
+                    page_decode_slot: decode_slot.map(|&(slot, _)| slot),
+                    page_decode_prob: decode_slot.map(|&(_, prob)| prob),
+                    ..Default::default()
+                }
             })
             .map(Ok)
             .collect()
@@ -138,6 +163,8 @@ impl Scorer<ScoredPostsQuery, PostCandidate> for PhoenixScorer {
         candidate.prediction_request_id = scored.prediction_request_id;
         candidate.last_scored_at_ms = scored.last_scored_at_ms;
         candidate.reranker_head_tag = scored.reranker_head_tag;
+        candidate.page_decode_slot = scored.page_decode_slot;
+        candidate.page_decode_prob = scored.page_decode_prob;
     }
 }
 

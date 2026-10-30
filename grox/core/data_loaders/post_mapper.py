@@ -364,6 +364,7 @@ class PostMapper:
             affiliated_business=AffiliatedBusiness(
                 name=user_metadata.affiliatedBusinessMetadata.name,
                 url=user_metadata.affiliatedBusinessMetadata.url,
+                badge_image_url=user_metadata.affiliatedBusinessMetadata.badgeImageUrl,
             )
             if user_metadata.affiliatedBusinessMetadata
             else None,
@@ -374,6 +375,7 @@ class PostMapper:
             if user_metadata.profileBannerImageUrl
             else None,
             blocked_count=user_metadata.blockedCount,
+            is_suspended=user_metadata.isSuspended,
         )
 
     @classmethod

@@ -325,8 +325,10 @@ ffi::Error RowwiseAdagradUpdateStartInit(
 ffi::Error validateRowwiseAdagradBuffers(
     const PipelineSpec& spec, const ffi::AnyBuffer& table, const ffi::AnyBuffer& row_state
 ) {
-  if (32 % spec.shard_width != 0) {
-    return invalid("rowwise_adagrad_update_start: shard_width must divide 32 (warp broadcast)");
+  if (kMaxShardWidth % spec.shard_width != 0) {
+    return invalid(
+        "rowwise_adagrad_update_start: shard_width must divide " + std::to_string(kMaxShardWidth)
+    );
   }
   if (table.element_type() != ffi::DataType::BF16 || table.dimensions().size() != 2 ||
       table.dimensions()[1] != spec.shard_width) {

@@ -7,7 +7,7 @@ use xai_candidate_pipeline::component_library::clients::redis_client::{self, Red
 use xai_candidate_pipeline::component_library::utils::is_prod;
 use xai_candidate_pipeline::side_effect::{SideEffect, SideEffectInput};
 
-const REDIS_TTL_SECONDS: u64 = 180;
+pub(crate) const REDIS_TTL_SECONDS: u64 = 180;
 const ZSTD_COMPRESSION_LEVEL: i32 = 6;
 
 pub struct RedisPostCandidateCacheSideEffect {
@@ -19,7 +19,7 @@ impl RedisPostCandidateCacheSideEffect {
         Self { redis_client }
     }
 
-    fn get_candidates_to_cache<'a>(
+    pub(crate) fn get_candidates_to_cache<'a>(
         selected: &'a [PostCandidate],
         non_selected: &'a [PostCandidate],
         max_posts_to_cache: usize,
@@ -188,6 +188,49 @@ mod tests {
         assert_eq!(cached[1].tweet_id, 3);
         assert_eq!(cached[2].tweet_id, 2);
         assert_eq!(cached[3].tweet_id, 4);
+    }
+
+    #[tokio::test]
+    async fn page_rl_fields_survive_the_cached_posts_round_trip() {
+        use crate::query_hydrators::cached_posts_query_hydrator::CachedPostsQueryHydrator;
+        use xai_candidate_pipeline::query_hydrator::QueryHydrator;
+
+        let redis_client = Arc::new(MockRedisClient::default());
+        let side_effect = RedisPostCandidateCacheSideEffect::new(redis_client.clone());
+        let query = test_query();
+        let decoded = PostCandidate {
+            page_decode_slot: Some(4),
+            page_decode_prob: Some(0.35),
+            page_rl_exploration_prob: Some(0.6),
+            ..candidate(11, 110, Some(0.9))
+        };
+        let input = Arc::new(SideEffectInput {
+            query: query.clone(),
+            selected_candidates: vec![decoded],
+            non_selected_candidates: vec![candidate(12, 120, Some(0.5))],
+        });
+
+        side_effect
+            .side_effect(input)
+            .await
+            .expect("side effect should succeed");
+        let hydrated = CachedPostsQueryHydrator {
+            redis_client: redis_client.clone(),
+        }
+        .hydrate(&query)
+        .await
+        .expect("cached posts should hydrate");
+
+        let cached = &hydrated.cached_posts;
+        assert_eq!(cached.len(), 2);
+        assert_eq!(cached[0].tweet_id, 11);
+        assert_eq!(cached[0].page_decode_slot, Some(4));
+        assert_eq!(cached[0].page_decode_prob, Some(0.35));
+        assert_eq!(cached[0].page_rl_exploration_prob, Some(0.6));
+        assert_eq!(cached[1].tweet_id, 12);
+        assert_eq!(cached[1].page_decode_slot, None);
+        assert_eq!(cached[1].page_decode_prob, None);
+        assert_eq!(cached[1].page_rl_exploration_prob, None);
     }
 
     #[test]

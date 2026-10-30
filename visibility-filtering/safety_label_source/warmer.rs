@@ -5,16 +5,13 @@ use tokio::sync::mpsc;
 use tonic::async_trait;
 use xai_strato::{encode, StratoGrpc};
 
-use super::metrics::{self, WarmKeyResult};
+use super::metrics::{self, LabelMetrics, WarmKeyResult};
+use crate::clients::strato;
 
 const WARM_COLUMN_PATH: &str = "visibility/baseTweetSafetyLabelMap";
 const WARM_CHANNEL_CAPACITY: usize = 1024;
 const WARM_LINGER: Duration = Duration::from_millis(500);
 const WARM_FETCH_MAX_KEYS: usize = 50;
-
-pub(crate) trait Warmer: Send + Sync {
-    fn warm(&self, miss_ids: Vec<u64>);
-}
 
 #[async_trait]
 pub(crate) trait WarmFetcher: Send + Sync {
@@ -34,18 +31,10 @@ impl StratoWarmFetcher {
 #[async_trait]
 impl WarmFetcher for StratoWarmFetcher {
     async fn fetch(&self, ids: &[u64]) -> usize {
-        let calls = ids
+        let keys = ids
             .iter()
-            .map(|id| {
-                (
-                    WARM_COLUMN_PATH.to_string(),
-                    "fetch".to_string(),
-                    vec![encode(&(id.cast_signed(), ()))],
-                )
-            })
-            .collect();
-        self.grpc
-            .batch_call(calls, None)
+            .map(|id| (WARM_COLUMN_PATH, encode(&(id.cast_signed(), ()))));
+        strato::fetch_each(&self.grpc, keys, None)
             .await
             .iter()
             .filter(|result| result.is_err())
@@ -55,37 +44,42 @@ impl WarmFetcher for StratoWarmFetcher {
 
 pub(crate) struct CacheWarmer {
     tx: mpsc::Sender<Vec<u64>>,
+    metrics: LabelMetrics,
 }
 
 impl CacheWarmer {
-    pub(crate) fn spawn(fetcher: Arc<dyn WarmFetcher>) -> Arc<Self> {
+    pub(crate) fn spawn(fetcher: Arc<dyn WarmFetcher>, metrics: LabelMetrics) -> Arc<Self> {
         let (tx, rx) = mpsc::channel(WARM_CHANNEL_CAPACITY);
-        tokio::spawn(drain(rx, fetcher));
-        Arc::new(Self { tx })
+        tokio::spawn(drain(rx, fetcher, metrics.clone()));
+        Arc::new(Self { tx, metrics })
     }
 
     #[cfg(test)]
     pub(crate) fn without_drain_task(capacity: usize) -> (Self, mpsc::Receiver<Vec<u64>>) {
         let (tx, rx) = mpsc::channel(capacity);
-        (Self { tx }, rx)
+        let metrics = LabelMetrics::default();
+        (Self { tx, metrics }, rx)
     }
-}
 
-impl Warmer for CacheWarmer {
-    fn warm(&self, miss_ids: Vec<u64>) {
-        metrics::record_cache_warm_keys(WarmKeyResult::EligibleMiss, miss_ids.len());
+    pub(crate) fn warm(&self, miss_ids: Vec<u64>) {
+        let record = |result, count| metrics::record_cache_warm_keys(&self.metrics, result, count);
+        record(WarmKeyResult::EligibleMiss, miss_ids.len());
         if miss_ids.is_empty() {
             return;
         }
         let count = miss_ids.len();
         match self.tx.try_send(miss_ids) {
-            Ok(()) => metrics::record_cache_warm_keys(WarmKeyResult::Enqueued, count),
-            Err(_) => metrics::record_cache_warm_keys(WarmKeyResult::DroppedChannelFull, count),
+            Ok(()) => record(WarmKeyResult::Enqueued, count),
+            Err(_) => record(WarmKeyResult::DroppedChannelFull, count),
         }
     }
 }
 
-async fn drain(mut rx: mpsc::Receiver<Vec<u64>>, fetcher: Arc<dyn WarmFetcher>) {
+async fn drain(
+    mut rx: mpsc::Receiver<Vec<u64>>,
+    fetcher: Arc<dyn WarmFetcher>,
+    metrics: LabelMetrics,
+) {
     while let Some(mut ids) = rx.recv().await {
         let deadline = tokio::time::Instant::now() + WARM_LINGER;
         while ids.len() < WARM_FETCH_MAX_KEYS {
@@ -96,8 +90,8 @@ async fn drain(mut rx: mpsc::Receiver<Vec<u64>>, fetcher: Arc<dyn WarmFetcher>) 
         }
         for chunk in ids.chunks(WARM_FETCH_MAX_KEYS) {
             let failed = fetcher.fetch(chunk).await;
-            metrics::record_cache_warm_keys(WarmKeyResult::FetchIssued, chunk.len());
-            metrics::record_cache_warm_keys(WarmKeyResult::FetchFailed, failed);
+            metrics::record_cache_warm_keys(&metrics, WarmKeyResult::FetchIssued, chunk.len());
+            metrics::record_cache_warm_keys(&metrics, WarmKeyResult::FetchFailed, failed);
         }
     }
 }
@@ -134,7 +128,8 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn drain_lingers_then_flushes_in_chunks() {
         let fetcher = FakeFetcher::new();
-        let warmer = CacheWarmer::spawn(Arc::<FakeFetcher>::clone(&fetcher));
+        let warmer =
+            CacheWarmer::spawn(Arc::<FakeFetcher>::clone(&fetcher), LabelMetrics::default());
 
         warmer.warm((0..30).collect());
         warmer.warm((30..60).collect());

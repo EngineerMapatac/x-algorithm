@@ -209,6 +209,8 @@ impl PipelineKind {
                 WindowConfig::bounded("1fav_video", 24 * 2, 24 * 4),
                 WindowConfig::bounded("1fav_video", 24 * 4, 24 * 14),
                 WindowConfig::bounded("1fav_video", 24 * 4, 24 * 30),
+                WindowConfig::new("video", 6),
+                WindowConfig::bounded("video", 6, 48),
                 WindowConfig::new("video", 48),
                 WindowConfig::new("video", 96),
                 WindowConfig::new("video", 24 * 14),
@@ -266,11 +268,27 @@ impl WindowConfig {
     }
 
     pub fn window_name(&self) -> String {
-        let days = self.retention.as_secs() / 86400;
+        let (ret_n, ret_unit) = span_parts(self.retention);
         match self.min_age {
-            Some(min) => format!("{}_{}to{days}day", self.name, min.as_secs() / 86400),
-            None => format!("{}_{days}day", self.name),
+            None => format!("{}_{ret_n}{ret_unit}", self.name),
+            Some(min) => {
+                let (min_n, min_unit) = span_parts(min);
+                if min_unit == ret_unit {
+                    format!("{}_{min_n}to{ret_n}{ret_unit}", self.name)
+                } else {
+                    format!("{}_{min_n}{min_unit}to{ret_n}{ret_unit}", self.name)
+                }
+            }
         }
+    }
+}
+
+fn span_parts(d: Duration) -> (u64, &'static str) {
+    let secs = d.as_secs();
+    if secs.is_multiple_of(86400) {
+        (secs / 86400, "day")
+    } else {
+        (secs / 3600, "h")
     }
 }
 
@@ -294,6 +312,19 @@ mod tests {
         assert_eq!(
             WindowConfig::bounded("nsfw_video", 24 * 4, 24 * 14).window_name(),
             "nsfw_video_4to14day"
+        );
+    }
+
+    #[test]
+    fn window_name_formatting_sub_day() {
+        assert_eq!(WindowConfig::new("video", 6).window_name(), "video_6h");
+        assert_eq!(
+            WindowConfig::bounded("video", 6, 48).window_name(),
+            "video_6hto2day"
+        );
+        assert_eq!(
+            WindowConfig::bounded("video", 6, 12).window_name(),
+            "video_6to12h"
         );
     }
 
@@ -408,6 +439,21 @@ mod tests {
             );
         }
         assert!(!names.iter().any(|n| n.contains("evergreen_video_grok")));
+    }
+
+    #[test]
+    fn sid_pipeline_includes_video_6h_windows() {
+        let names: Vec<String> = PipelineKind::Sid
+            .window_configs()
+            .iter()
+            .map(|w| w.window_name())
+            .collect();
+        for w in ["video_6h", "video_6hto2day"] {
+            assert!(
+                names.contains(&w.to_string()),
+                "Sid window list missing {w}: {names:?}",
+            );
+        }
     }
 
     #[test]

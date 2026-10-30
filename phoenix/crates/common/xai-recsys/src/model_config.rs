@@ -107,6 +107,7 @@ pub struct HashTableConfig {
 
     pub enable_stale_post: bool,
     pub enable_stale_post_30d: bool,
+    pub ads_count_features: bool,
 }
 
 impl HashTableConfig {
@@ -353,6 +354,7 @@ impl ModelConfig {
                 num_post_int64_features,
                 enable_stale_post,
                 enable_stale_post_30d: false,
+                ads_count_features: false,
             },
             history_seq_len,
             candidate_seq_len,

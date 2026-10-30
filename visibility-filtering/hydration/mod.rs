@@ -1,26 +1,32 @@
 pub mod batch;
 pub(crate) mod community_source;
 mod decode;
-mod execute;
+pub(crate) mod execute;
 pub(crate) mod fallback_cache;
 mod fetcher;
 mod hydrator;
 pub(crate) mod inventory;
 pub mod metrics;
 pub(crate) mod plan;
+mod relation;
 pub(crate) mod sources;
 mod store;
 pub mod tweet_source;
 
+use crate::metrics::RequestMetrics;
 use crate::models::{
-    ClientCapability, PostCandidate, RawCandidate, TweetFeatures, TweetId, ViewerFeatures,
+    AuthorId, ClientCapability, EdgeSet, Placement, PostCandidate, Quote, RawCandidate,
+    RetweetMerge, TweetId, UserCandidate, UserEntity, ViewerFeatures,
 };
+pub(crate) use decode::author::AuthorNotFound;
 pub(crate) use decode::author::fallback_cache as author_fallback_cache;
 pub(crate) use decode::tweet::tweet_fallback_cache;
 use decode::viewer::ViewerState;
 use fallback_cache::FallbackCaches;
+pub(crate) use hydrator::RequestRows;
 pub use hydrator::{Hydrator, Hydrators};
 pub(crate) use plan::HydrationPlan;
+pub(crate) use relation::Relation;
 use rustc_hash::FxHashMap;
 use std::borrow::Cow;
 use std::hash::Hash;
@@ -50,9 +56,18 @@ pub(crate) struct HydrationRequest<'a> {
     viewer_id: Option<u64>,
     country_code: Option<String>,
     client_capability: ClientCapability,
-    raw_candidates: &'a [RawCandidate],
-    is_expanding_retweet_sources: bool,
+    raw_candidates: Vec<RawCandidate>,
+    users: Vec<AuthorId>,
+    quotes: Vec<QuoteEntry>,
+    retweet_merge: RetweetMerge,
     fallback_caches: &'a FallbackCaches,
+    metrics: &'a RequestMetrics,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub(crate) struct QuoteEntry {
+    pub(crate) inner: TweetId,
+    pub(crate) outer: TweetId,
 }
 
 impl<'a> HydrationRequest<'a> {
@@ -60,28 +75,51 @@ impl<'a> HydrationRequest<'a> {
         viewer_id: Option<u64>,
         country_code: Option<String>,
         client_capability: ClientCapability,
-        raw_candidates: &'a [RawCandidate],
+        raw_candidates: Vec<RawCandidate>,
+        retweet_merge: RetweetMerge,
         fallback_caches: &'a FallbackCaches,
+        metrics: &'a RequestMetrics,
     ) -> Self {
         Self {
             viewer_id,
             country_code,
             client_capability,
             raw_candidates,
-            is_expanding_retweet_sources: false,
+            users: Vec::new(),
+            quotes: Vec::new(),
+            retweet_merge,
             fallback_caches,
+            metrics,
         }
     }
 
-    pub(crate) fn with_retweet_sources(mut self, is_expanding_retweet_sources: bool) -> Self {
-        self.is_expanding_retweet_sources = is_expanding_retweet_sources;
+    pub(crate) fn for_users(
+        viewer_id: u64,
+        users: Vec<AuthorId>,
+        fallback_caches: &'a FallbackCaches,
+        metrics: &'a RequestMetrics,
+    ) -> Self {
+        Self {
+            users,
+            ..Self::new(
+                Some(viewer_id),
+                None,
+                ClientCapability::default(),
+                Vec::new(),
+                RetweetMerge::Unmerged,
+                fallback_caches,
+                metrics,
+            )
+        }
+    }
+
+    pub(crate) fn with_quotes(mut self, quotes: Vec<QuoteEntry>) -> Self {
+        self.quotes = quotes;
         self
     }
 }
 
-pub(crate) fn candidate_count_by_key<K: Eq + Hash>(
-    keys: impl Iterator<Item = K>,
-) -> FxHashMap<K, usize> {
+fn candidate_count_by_key<K: Eq + Hash>(keys: impl Iterator<Item = K>) -> FxHashMap<K, usize> {
     let mut candidate_count_by_key =
         FxHashMap::with_capacity_and_hasher(keys.size_hint().0, Default::default());
     for key in keys {
@@ -94,9 +132,27 @@ pub(crate) struct Hydration {
     viewer: ViewerFeatures,
     viewer_state: Option<ViewerState>,
     planned: Hydrators,
-    incomplete: Hydrators,
+    viewer_failed: Hydrators,
     tweets: FxHashMap<TweetId, HydratedTweet>,
-    has_fetched_sources: bool,
+    users: FxHashMap<AuthorId, HydratedUser>,
+    quotes: FxHashMap<QuoteEntry, Quoted>,
+    has_fetched_retweet_sources: bool,
+    retweet_merge: RetweetMerge,
+}
+
+pub(crate) enum HydratedUser {
+    Resolved {
+        user: UserEntity,
+        edges: EdgeSet,
+        failed: Hydrators,
+    },
+    Unresolved(Cause),
+}
+
+#[derive(Clone, Copy, Default)]
+struct Quoted {
+    quote: Option<Quote>,
+    failed: Hydrators,
 }
 
 impl Hydration {
@@ -112,12 +168,60 @@ impl Hydration {
         self.planned
     }
 
-        pub(crate) fn incomplete(&self) -> Hydrators {
-        self.incomplete
+    pub(crate) fn viewer_failed(&self) -> Hydrators {
+        self.viewer_failed
     }
 
     pub(crate) fn tweet(&self, id: TweetId) -> Option<&HydratedTweet> {
         self.tweets.get(&id)
+    }
+
+    pub(crate) fn user(&self, id: AuthorId) -> Option<&HydratedUser> {
+        self.users.get(&id)
+    }
+
+    pub(crate) fn author(
+        &self,
+        id: TweetId,
+        placement: Placement,
+        reads: Hydrators,
+    ) -> Option<UserCandidate> {
+        let post = self.tweet(id)?.candidate()?;
+        let quoted = match placement {
+            Placement::InnerQuoted { outer } => self
+                .quotes
+                .get(&QuoteEntry { inner: id, outer })
+                .copied()
+                .unwrap_or_default(),
+            Placement::Standalone | Placement::RetweetSource => Quoted::default(),
+        };
+        Some(UserCandidate {
+            user: post.author.clone(),
+            edges: post.edges,
+            quote: quoted.quote,
+            failed: post.failed.intersection(reads).union(quoted.failed),
+        })
+    }
+
+    pub(crate) fn user_candidate(&self, id: AuthorId, reads: Hydrators) -> Option<UserCandidate> {
+        let HydratedUser::Resolved {
+            user,
+            edges,
+            failed,
+        } = self.user(id)?
+        else {
+            return None;
+        };
+        Some(UserCandidate {
+            user: user.clone(),
+            edges: *edges,
+            quote: None,
+            failed: failed.intersection(reads),
+        })
+    }
+
+    pub(crate) fn is_on(&self, relation: Relation) -> bool {
+        relation.is_on(self.retweet_merge, self.planned)
     }
 
             pub(crate) fn candidate(&self, id: TweetId, copied: bool) -> Option<Cow<'_, PostCandidate>> {
@@ -126,56 +230,32 @@ impl Hydration {
         let copy = copied
             .then(|| self.tweet(tweet.source_tweet_id()?)?.candidate())
             .flatten()
-            .map(|source| CopiedFromSource::of(&source.post.tweet_features))
-            .filter(|copy| !copy.is_on(&candidate.post.tweet_features));
+            .map(|source| source.post.tweet_features.media.has_uploaded_media)
+            .filter(|&has_media| has_media != candidate.post.tweet_features.media.has_media);
         Some(match copy {
             None => Cow::Borrowed(candidate),
-            Some(copy) => {
+            Some(has_media) => {
                 let mut candidate = candidate.clone();
-                copy.copy_onto(&mut candidate.post.tweet_features);
+                candidate.post.tweet_features.media.has_media = has_media;
                 Cow::Owned(candidate)
             }
         })
     }
 
     pub(crate) fn failed_nodes(&self, post: TweetId) -> Hydrators {
-        let Some(HydratedTweet::Resolved {
-            candidate,
-            source_tweet_id,
-            ..
-        }) = self.tweet(post)
-        else {
+        let Some(candidate) = self.tweet(post).and_then(HydratedTweet::candidate) else {
             return Hydrators::empty();
         };
-        let source = source_tweet_id
-            .and_then(|source| self.tweet(source)?.candidate())
+        let source = candidate
+            .post
+            .source_tweet_id
+            .and_then(|source| self.tweet(TweetId(source))?.candidate())
             .map_or(Hydrators::empty(), |source| source.failed);
         candidate.failed.union(source)
     }
 
-    pub(crate) fn has_fetched_sources(&self) -> bool {
-        self.has_fetched_sources
-    }
-}
-
-#[derive(Clone, Copy)]
-struct CopiedFromSource {
-    has_media: bool,
-}
-
-impl CopiedFromSource {
-    fn of(source: &TweetFeatures) -> Self {
-        Self {
-            has_media: source.media.has_uploaded_media,
-        }
-    }
-
-    fn is_on(self, retweet: &TweetFeatures) -> bool {
-        retweet.media.has_media == self.has_media
-    }
-
-    fn copy_onto(self, retweet: &mut TweetFeatures) {
-        retweet.media.has_media = self.has_media;
+    pub(crate) fn has_fetched_retweet_sources(&self) -> bool {
+        self.has_fetched_retweet_sources
     }
 }
 
@@ -186,7 +266,6 @@ impl CopiedFromSource {
 pub(crate) enum HydratedTweet {
     Resolved {
         candidate: PostCandidate,
-        source_tweet_id: Option<TweetId>,
         safety_labels: Option<Arc<vf_pb::SafetyLabelMap>>,
     },
     Unresolved {
@@ -226,23 +305,15 @@ impl HydratedTweet {
     }
 
     pub(crate) fn source_tweet_id(&self) -> Option<TweetId> {
-        match self {
-            Self::Resolved {
-                source_tweet_id, ..
-            } => *source_tweet_id,
-            Self::Unresolved { .. } => None,
-        }
+        self.candidate()?.post.source_tweet_id.map(TweetId)
     }
 
     pub(crate) fn source_to_merge(&self) -> Option<TweetId> {
-        match self {
-            Self::Resolved {
-                candidate,
-                source_tweet_id,
-                ..
-            } if !candidate.failed.has_must_have() => *source_tweet_id,
-            Self::Resolved { .. } | Self::Unresolved { .. } => None,
-        }
+        self.candidate()
+            .filter(|candidate| !candidate.failed.has_must_have())?
+            .post
+            .source_tweet_id
+            .map(TweetId)
     }
 
     pub(crate) fn safety_labels(&self) -> Option<&Arc<vf_pb::SafetyLabelMap>> {
@@ -252,22 +323,6 @@ impl HydratedTweet {
             }
         }
     }
-}
-
-#[cfg(test)]
-pub(crate) fn assert_blessed(fixture: &str, blessed: &str, rendered: &str) {
-    if std::env::var_os("VF_BLESS").is_some() {
-        let outputs = std::env::var("TEST_UNDECLARED_OUTPUTS_DIR").expect("bless under bazel test");
-        std::fs::write(std::path::Path::new(&outputs).join(fixture), rendered).unwrap();
-        return;
-    }
-    assert!(
-        blessed == rendered,
-        "{fixture} changed. Bless it with `bazel test --test_env=VF_BLESS=1 \
-         --nozip_undeclared_test_outputs --test_arg=<test> <this target>`, then copy \
-         `bazel-testlogs/<this target>/test.outputs/{fixture}` to tests/fixtures.\n\
-         --- blessed\n{blessed}--- rendered\n{rendered}"
-    );
 }
 
 #[cfg(test)]

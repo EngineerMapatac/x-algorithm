@@ -270,7 +270,7 @@ def _xrecsys_two_tower_combined_base() -> dict:
         "total_samples": 1e11,
         "empty_history_user_dropout_rate": 0.1,
         "learning_rate": 2e-3,
-        "emb_learning_rate": 0.1,
+        "emb_learning_rate": 0.2,
         "qk_norm": True,
         "attn_logit_cap": -1,
         "primer_norm": True,
@@ -309,6 +309,23 @@ def _xrecsys_two_tower_combined_base() -> dict:
             "IMMERSIVENSFW",
         ],
         "split_home_checkpoint": True,
+        "cold_start_max_age_seconds": 7200,
+        "user_query_heads": 4,
+        "user_query_head_init_std": 0.02,
+        "mol_item_components": 1,
+        "mol_item_adapter_rank": 64,
+        "mol_gate_hidden": 32,
+        "mol_conditioned_gate": True,
+        "mol_train_user_chunk": 96,
+        "mol_side_table_in_checkpoint": True,
+        "mask_in_batch_false_negatives": True,
+        "fixed_temperature": 0.006,
+        "positive_count_user_weight_power": 0.5,
+        "own_negative_logit_offset": -2.0,
+        "dense_params_ema_decay": 0.99,
+        "dense_params_ema_in_checkpoint": True,
+        "sid_prefix2_embed_dim": 128,
+        "sid_prefix3_embed_dim": 128,
         "max_posts": 28_672_000,
         "use_user_embedding": False,
         "use_post_embedding": False,
@@ -368,6 +385,7 @@ def _immersive_only_base() -> dict:
         "eval_bs_per_device": 8,
         "eval_every_n": 1000,
         "target_dataset_type": RetrievalDataset.IMMERSIVE2Day,
+        "extra_eval_dataset_types": ["IMMERSIVE4Day", "EVERGREEN", "IMMERSIVENSFW"],
         "checkpoint_dataset_names": [
             "IMMERSIVE4Day",
             "IMMERSIVE2Day",
@@ -495,6 +513,20 @@ MODEL_CFGS = {
     ),
     "xrecsys_two_tower_combined": _make_cfg(
         {**_xrecsys_two_tower_combined_base(), **_H100_OVERRIDES},
+        user_vocab_size=0,
+        item_vocab_size=0,
+        item_hash_vocab_size=100_000_000,
+        author_vocab_size=30_000_000,
+    ),
+    "xrecsys_two_tower_home_only": _make_cfg(
+        {
+            **_xrecsys_two_tower_combined_base(),
+            **_H100_OVERRIDES,
+            "num_candidate_heads": 2,
+            "head_names": ["home", "ld"],
+            "head_dataset_mapping": {"HOME": 0, "HOME_COLD": 0, "HOME_HOT": 0},
+            "checkpoint_dataset_names": ["HOME"],
+        },
         user_vocab_size=0,
         item_vocab_size=0,
         item_hash_vocab_size=100_000_000,
@@ -688,6 +720,12 @@ for config in configs:
         evals=evals,
         split_home_checkpoint=mparams.get("split_home_checkpoint", False),
         eval_every_n=mparams.get("eval_every_n", 1000),
+        dense_params_ema_decay=mparams.get(
+            "dense_params_ema_decay", RecsysTrainer.dense_params_ema_decay
+        ),
+        dense_params_ema_in_checkpoint=mparams.get(
+            "dense_params_ema_in_checkpoint", RecsysTrainer.dense_params_ema_in_checkpoint
+        ),
         model_config=RecsysTwoTowerModelConfig(
             num_global_negatives_per_example=mparams["num_global_negatives_per_example"],
             debug_mode=False,
@@ -817,6 +855,12 @@ for config in configs:
                 sid_codebook_size=mparams.get("sid_codebook_size", 1024),
                 sid_hash_level=mparams.get("sid_hash_level", False),
                 sid_cross_attn=mparams.get("sid_cross_attn", False),
+                sid_prefix2_embed_dim=mparams.get(
+                    "sid_prefix2_embed_dim", RecsysAggregatedModelConfig.sid_prefix2_embed_dim
+                ),
+                sid_prefix3_embed_dim=mparams.get(
+                    "sid_prefix3_embed_dim", RecsysAggregatedModelConfig.sid_prefix3_embed_dim
+                ),
                 context_features=ContextFeaturesConfig(
                     enabled=mparams.get("enable_context_features", True),
                     categorical_features=[

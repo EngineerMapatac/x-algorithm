@@ -18,6 +18,7 @@ from xrex.data.recsys.feature_config import (
 )
 from xrex.data.recsys.recsys_batch import EMBEDDING_CONFIG
 from xrex.data.recsys.sequence_packing import BetaLengthDistribution
+from xrex.models.fp8 import Fp8Gemms
 from xrex.models.page_rl import PAGE_PARAM_REGEX, PageRlConfig
 from xrex.models.recsys_attention import RecsysAttentionConfig
 from xrex.models.recsys_embedding import HashKeys, HashTable
@@ -93,6 +94,7 @@ def _make_feature_prep_config(mparams: dict, scale_config: ScaleConfig) -> Featu
         sid_cross_attn=mparams.get("sid_cross_attn", False),
         sid_embedding_mode=mparams.get("sid_embedding_mode", "learned"),
         sid_decoder_path=mparams.get("sid_decoder_path", ""),
+        sid_recon_rows_per_decoder_pass=mparams.get("sid_recon_rows_per_decoder_pass", 16384),
         enable_stale_post=mparams.get("enable_stale_post", False),
     )
 
@@ -327,13 +329,12 @@ def _home_direct_packed_base() -> dict:
 
 
 _H100_OVERRIDES = {
-    "bs_per_device": 512,
-    "num_microbatch": 2,
-    "ep": 128,
+    "bs_per_device": 1024,
+    "num_microbatch": 8,
+    "ep": 64,
     "use_async_emb": True,
-    "seqpack_drop_empty_candidates": True,
     "overlap_step_host_work": True,
-    "remat_policy": RematType.SAVE_H100_QKV_ATTN_FFN,
+    "remat_policy": RematType.SAVE_H100_RECSYS,
     "unroll_layer_stack": True,
     "attn_impl": "cutedsl_ranker_varlen_attn",
     "learning_rate": 7.1e-4,
@@ -392,7 +393,6 @@ def _immersive_page_rl() -> dict:
         **base,
         "bs_per_device": 256,
         "num_microbatch": 1,
-        "seqpack_drop_empty_candidates": False,
         "overlap_step_host_work": False,
         "remat_policy": RematType.WHOLE,
         "unroll_layer_stack": False,
@@ -415,6 +415,18 @@ def _immersive_page_rl() -> dict:
             rowwise_adagrad=replace(base["emb_optim_config"].rowwise_adagrad, learning_rate=0.198),
         ),
         "page_rl": PageRlConfig(enabled=True),
+    }
+
+
+def _immersive_page_rl_cread() -> dict:
+    base = _immersive_page_rl()
+    return {
+        **base,
+        "dwell_tweedie_loss_weight": 0.0,
+        "dwell_mae_loss_weight": 0.0,
+        "dwell_cread_loss_weight": 0.1,
+        "dwell_cread_immersive_loss_weight": 0.1,
+        "feature_prep": replace(base["feature_prep"], enable_dwell_bucket_table=True),
     }
 
 
@@ -462,7 +474,16 @@ MODEL_CFGS = {
         ip_vocab_size=10_000_000,
     ),
     "home_direct_packed": _make_cfg(
-        {**_home_direct_packed_base(), **_H100_OVERRIDES},
+        {
+            **_home_direct_packed_base(),
+            **_H100_OVERRIDES,
+            "seqpack_candidate_packing": True,
+            "seqpack_candidate_count": [32, 128],
+            "num_candidate_only_layers": 2,
+            "candidate_only_attn_impl": "cutedsl_ranker_candidate_only_attn",
+            "fp8_gemms": Fp8Gemms.ALL,
+            "metrics_ndcg_shared_sorts": True,
+        },
         user_vocab_size=100_000_000,
         item_vocab_size=100_000_000,
         author_vocab_size=30_000_000,
@@ -477,6 +498,13 @@ MODEL_CFGS = {
     ),
     "immersive_page_rl": _make_cfg(
         _immersive_page_rl(),
+        user_vocab_size=100_000_000,
+        item_vocab_size=100_000_000,
+        author_vocab_size=30_000_000,
+        ip_vocab_size=10_000_000,
+    ),
+    "immersive_page_rl_cread": _make_cfg(
+        _immersive_page_rl_cread(),
         user_vocab_size=100_000_000,
         item_vocab_size=100_000_000,
         author_vocab_size=30_000_000,
@@ -712,19 +740,29 @@ def make_trainer(config_name: str, mparams: dict, dataset_type: str) -> RecsysTr
             ads_pixel_head_masking=mparams.get("ads_pixel_head_masking", False),
             enable_dpa_input_embedding=mparams.get("enable_dpa_input_embedding", False),
             attend_padded_history=mparams.get("attend_padded_history", False),
+            pad_candidates_to_128=mparams.get("pad_candidates_to_128", True),
             concat_history_bridge_prob=mparams.get("concat_history_bridge_prob", False),
             concat_history_web_conv_time_on_site=mparams.get(
                 "concat_history_web_conv_time_on_site", False
             ),
+            add_history_web_conv_value=mparams.get("add_history_web_conv_value", False),
+            wallclock_recency=mparams.get("wallclock_recency", False),
+            ads_counts_emb_dim=mparams.get("ads_counts_emb_dim", 0),
             mact_in_app_loss_weight=mparams.get("mact_in_app_loss_weight", 1.0),
             purchase_value_loss_weight=mparams.get("purchase_value_loss_weight", 0.0),
             purchase_value_huber_delta=mparams.get("purchase_value_huber_delta", 1.0),
+            value_loss_normalization=mparams.get("value_loss_normalization", "valid_rows"),
+            aux_value_head_weights=mparams.get("aux_value_head_weights", ""),
+            aux_value_head_type=mparams.get("aux_value_head_type", "binned"),
+            aux_value_include_view_through=mparams.get("aux_value_include_view_through", False),
             condition_search_relevance_on_prompt=mparams.get(
                 "condition_search_relevance_on_prompt", False
             ),
             metric_group=mparams.get("metric_group", "default"),
             enable_platform_metrics=mparams.get("enable_platform_metrics", False),
             metric_mask_keys=mparams.get("metric_mask_keys"),
+            metric_own_slice=mparams.get("metric_own_slice", False),
+            metrics_ndcg_shared_sorts=mparams.get("metrics_ndcg_shared_sorts", False),
             conversion_delay_slice_thresholds_s=tuple(
                 mparams.get("conversion_delay_slice_thresholds_s", ())
             ),
@@ -906,6 +944,7 @@ def make_trainer(config_name: str, mparams: dict, dataset_type: str) -> RecsysTr
                     qk_norm=mparams.get("qk_norm", False),
                     max_num_segments_per_batch=1,
                     attn_impl=mparams["attn_impl"],
+                    candidate_only_attn_impl=mparams.get("candidate_only_attn_impl"),
                     fa_version="3",
                     qkv_merge=True,
                     rotary=True,
@@ -925,8 +964,13 @@ def make_trainer(config_name: str, mparams: dict, dataset_type: str) -> RecsysTr
                 primer_norm=mparams.get("primer_norm", True),
                 use_remat=True,
                 remat_policy=mparams.get("remat_policy", RematType.WHOLE),
+                fp8_gemms=mparams.get("fp8_gemms", Fp8Gemms.OFF),
                 use_layer_stack=True,
                 unroll_layer_stack=mparams.get("unroll_layer_stack", False),
+                num_candidate_only_layers=mparams.get("num_candidate_only_layers", 0),
+                candidate_only_layers_update_user_token=mparams.get(
+                    "candidate_only_layers_update_user_token", False
+                ),
                 output_vocab_size=mparams["output_vocab_size"],
             ),
             hash_table=hash_table,
@@ -937,7 +981,8 @@ def make_trainer(config_name: str, mparams: dict, dataset_type: str) -> RecsysTr
         use_row_emb=mparams.get("use_row_emb", False),
         row_emb_recv_factor=mparams.get("row_emb_recv_factor", 2.0),
         overlap_step_host_work=mparams.get("overlap_step_host_work", False),
-        seqpack_drop_empty_candidates=mparams.get("seqpack_drop_empty_candidates", False),
+        seqpack_candidate_packing=mparams.get("seqpack_candidate_packing", False),
+        seqpack_candidate_count=mparams.get("seqpack_candidate_count", []),
         seqpack_distribution=seqpack_distribution,
         dataset=dataset,
         parallel_config=ParallelConfig(

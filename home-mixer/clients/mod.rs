@@ -10,6 +10,7 @@ pub mod popular_authors_store_client;
 pub mod post_engagers_client;
 pub mod post_v8_search_embedding_client;
 pub mod prompts_client;
+pub mod recent_search_queries_store_client;
 pub mod resurrection_date_client;
 pub mod rotating_channel;
 pub mod s2s;

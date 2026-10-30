@@ -1,7 +1,8 @@
 use crate::hydration::{Hydrators, Lookup};
-use crate::params::LimitedActionType;
+use crate::rules::RuleId;
 use xai_visibility_filtering::models::FilteredReason;
 use xai_x_thrift::action::{AppealablePolicy, InterstitialAction, InterstitialReason};
+use xai_x_thrift::safety_result::SafetyResultReason;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Verdict {
@@ -13,13 +14,87 @@ pub enum Verdict {
     },
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Notice {
     SoftIntervention(FosnrReason),
     Appealable {
         reason: FosnrReason,
         limited_actions: &'static [LimitedActionType],
     },
+    LabelInterstitial(LabelInterstitial),
+}
+
+impl Notice {
+    pub fn is_whole_verdict(&self) -> bool {
+        !matches!(self, Self::LabelInterstitial(_))
+    }
+
+    pub fn limited_engagement_reason(&self) -> Option<LimitedEngagementReason> {
+        match self {
+            Self::SoftIntervention(_) | Self::Appealable { .. } => None,
+            Self::LabelInterstitial(interstitial) => Some(interstitial.limited_engagement_reason()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::EnumString)]
+#[strum(serialize_all = "snake_case")]
+pub enum LimitedActionType {
+    Reply,
+    Retweet,
+    QuoteTweet,
+    Like,
+    React,
+    SendViaDm,
+    AddToBookmarks,
+    AddToMoment,
+    PinToProfile,
+    ViewTweetActivity,
+    ShareTweetVia,
+    Follow,
+    ListsAddRemove,
+    MuteConversation,
+    Embed,
+    ViewHiddenReplies,
+    HideCommunityTweet,
+    CopyLink,
+    VoteOnPoll,
+    RemoveFromCommunity,
+    ShowRetweetActionMenu,
+    ReplyDownVote,
+    Autoplay,
+    EditTweet,
+    Highlight,
+    ViewPostEngagements,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LabelInterstitial {
+    PublicInterest(PublicInterest),
+    EmergencyDynamic(Box<EmergencyCopy>),
+}
+
+impl LabelInterstitial {
+    pub fn limited_engagement_reason(&self) -> LimitedEngagementReason {
+        match self {
+            Self::PublicInterest(notice) => notice
+                .limit
+                .unwrap_or(LimitedEngagementReason::NonCompliant),
+            Self::EmergencyDynamic(_) => LimitedEngagementReason::NonCompliant,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PublicInterest {
+    pub reason: SafetyResultReason,
+    pub limit: Option<LimitedEngagementReason>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EmergencyCopy {
+    pub copy: String,
+    pub link: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,6 +108,7 @@ pub struct FosnrReason {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Decided<T> {
     pub value: T,
+    pub(crate) id: RuleId,
     pub by: &'static str,
 }
 
@@ -121,6 +197,7 @@ impl LimitedEngagement {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum TombstoneReason {
+    Bounced,
     SensitiveViewerAgeVerification,
     UpdateAppIos,
     UpdateAppAndroid,
@@ -130,6 +207,7 @@ pub enum TombstoneReason {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum LimitedEngagementReason {
+    NonCompliant,
     ConversationControl,
     ReadonlyViewer,
     BlockedViewer,
@@ -147,6 +225,7 @@ pub enum LimitedEngagementReason {
 impl LimitedEngagementReason {
     pub const fn limited_actions_string(self) -> &'static str {
         match self {
+            Self::NonCompliant => "non_compliant",
             Self::ConversationControl => "limited_replies",
             Self::ReadonlyViewer => "readonly_viewer",
             Self::BlockedViewer => "blocked_viewer",
@@ -161,25 +240,49 @@ impl LimitedEngagementReason {
             Self::LocalTweet => "local_tweet",
         }
     }
+
+    pub fn from_misinfo_source(source: &str) -> Option<Self> {
+        [
+            Self::NonCompliant,
+            Self::ConversationControl,
+            Self::CommunityTweetHidden,
+            Self::CommunityTweetMemberRemoved,
+            Self::CommunityTweetViewerRemoved,
+            Self::StaleTweet,
+            Self::LocalTweet,
+            Self::ReadonlyViewer,
+            Self::BlockedViewer,
+            Self::RootAuthorBlockedViewer,
+        ]
+        .into_iter()
+        .find(|reason| reason.limited_actions_string() == source)
+    }
 }
 
 impl Verdict {
     pub(crate) fn limited_engagement_reasons(
         &self,
     ) -> impl Iterator<Item = LimitedEngagementReason> + '_ {
-        let limit = match self {
+        let (notice, limit) = match self {
             Self::Shown {
-                engagement: Some(limit),
-                ..
-            } => Some(limit),
-            Self::Shown { .. } | Self::Withheld(_) => None,
+                notice, engagement, ..
+            } => (
+                notice
+                    .as_ref()
+                    .and_then(|notice| notice.value.limited_engagement_reason()),
+                engagement.as_ref(),
+            ),
+            Self::Withheld(_) => (None, None),
         };
-        limit.into_iter().flat_map(|limit| limit.value.reasons())
+        notice
+            .into_iter()
+            .chain(limit.into_iter().flat_map(|limit| limit.value.reasons()))
     }
 
     pub const fn not_found() -> Self {
         Self::Withheld(Decided {
             value: Withholding::Drop(DropReason::Legacy(FilteredReason::UnspecifiedReason)),
+            id: RuleId::NotFound,
             by: "not_found",
         })
     }
@@ -187,6 +290,7 @@ impl Verdict {
     pub const fn lookup_failed() -> Self {
         Self::Withheld(Decided {
             value: Withholding::Drop(DropReason::Legacy(FilteredReason::UnspecifiedReason)),
+            id: RuleId::LookupFailed,
             by: "lookup_failed",
         })
     }
@@ -218,6 +322,7 @@ impl Evaluation {
         }
     }
 
+    #[cfg(test)]
     pub fn into_verdict(self) -> Verdict {
         match self {
             Self::Complete { verdict, .. } | Self::Partial { verdict, .. } => verdict,

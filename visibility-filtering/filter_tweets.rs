@@ -1,39 +1,35 @@
-use crate::caller_identity::Endpoint;
-use crate::metrics::{self as ft_metrics, Rpc};
-use crate::models::{ClientCapability, RawCandidate, TweetId};
-use crate::post_evaluator::{PostBatch, PostEvaluation, PostEvaluator};
-use crate::rules::SafetyLevel;
+use crate::ingress;
+use crate::metrics::{self as ft_metrics, Endpoint, RequestLevel, RequestMetrics};
+use crate::models::RequestViewer;
+use crate::params::ClientSwitches;
+use crate::post_evaluator::{PostEvaluation, PostEvaluator};
+use crate::rules::{NoTrace, SafetyLevel, WireLevel};
 use crate::treatment;
 use std::sync::Arc;
-use std::time::Duration;
-use tonic::metadata::MetadataMap;
 use tonic::{Request, Response, Status};
 use xai_visibility_filtering_proto as vf_pb;
 
 pub(crate) type FinishComparison = Box<dyn FnOnce(&[PostEvaluation]) + Send>;
 
 pub(crate) trait Comparator: Send + Sync {
-    fn begin(
-        &self,
-        viewer_id: Option<u64>,
-        country_code: Option<String>,
-        safety_level: SafetyLevel,
-        tweet_ids: Vec<u64>,
-    ) -> Option<FinishComparison>;
+    fn begin(&self, viewer: &RequestViewer, safety_level: SafetyLevel) -> Option<FinishComparison>;
 }
 
 pub struct FilterTweetsEndpoint {
     post_evaluator: Arc<PostEvaluator>,
+    client_switches: ClientSwitches,
     comparator: Option<Box<dyn Comparator>>,
 }
 
 impl FilterTweetsEndpoint {
     pub(crate) fn new(
         post_evaluator: Arc<PostEvaluator>,
+        client_switches: ClientSwitches,
         comparator: Option<Box<dyn Comparator>>,
     ) -> Self {
         Self {
             post_evaluator,
+            client_switches,
             comparator,
         }
     }
@@ -42,122 +38,63 @@ impl FilterTweetsEndpoint {
         &self,
         request: Request<vf_pb::VisibilityFilterRequest>,
     ) -> Result<Response<vf_pb::VisibilityFilterResponse>, Status> {
-        let entered = tokio::time::Instant::now();
-        ft_metrics::observe_request(Endpoint::FilterTweets, request, |request, grpc_timeout| {
-            self.handle_inner(request, entered, grpc_timeout)
-        })
+        let safety_level =
+            ingress::level(WireLevel::FilterTweets(request.get_ref().safety_level()));
+        ft_metrics::observe_request(
+            self.post_evaluator.metrics(),
+            Endpoint::FilterTweets,
+            RequestLevel::of(safety_level.as_ref().ok().copied()),
+            request,
+            |request, context, metrics| self.handle_inner(request, context, metrics, safety_level),
+        )
         .await
     }
 
     async fn handle_inner(
         &self,
         request: Request<vf_pb::VisibilityFilterRequest>,
-        entered: tokio::time::Instant,
-        grpc_timeout: Option<Duration>,
+        context: xai_x_rpc::CallContext,
+        metrics: RequestMetrics,
+        safety_level: Result<SafetyLevel, Status>,
     ) -> Result<Response<vf_pb::VisibilityFilterResponse>, Status> {
-        let context = crate::hydration::request_context(entered, grpc_timeout);
         let req = request.into_inner();
-        ft_metrics::record_batch_size(ft_metrics::BATCH_SIZE, req.tweets.len());
-        let viewer_id = normalize_viewer_id(req.viewer_id);
-        ft_metrics::record_viewer_state(req.viewer_id, viewer_id);
+        ft_metrics::record_batch_size(&metrics, req.tweets.len());
+        let safety_level = safety_level?;
+        let raw_viewer_id = req.viewer_id;
+        let request = ingress::filter_tweets(req);
+        ft_metrics::record_viewer_state(metrics.plain(), raw_viewer_id, request.viewer.id());
 
-        let Some(safety_level) = SafetyLevel::from_proto(req.safety_level()) else {
-            return Err(Status::unimplemented("safety level has no Rust policy"));
-        };
-        let candidates: Vec<RawCandidate> = req
-            .tweets
-            .iter()
-            .map(|t| RawCandidate {
-                tweet_id: TweetId(t.tweet_id),
-                request_author_id: t.author_id,
-            })
-            .collect();
+        let finish_comparison = self
+            .comparator
+            .as_ref()
+            .and_then(|comparator| comparator.begin(&request.viewer, safety_level));
 
-        let finish_comparison = self.comparator.as_ref().and_then(|comparator| {
-            comparator.begin(
-                viewer_id,
-                req.country_code.clone(),
-                safety_level,
-                req.tweets.iter().map(|t| t.tweet_id).collect(),
-            )
-        });
-
-        let response = context
-            .scope(self.post_evaluator.run(PostBatch {
-                viewer_id,
-                country_code: req.country_code.filter(|code| !code.is_empty()),
-                client_capability: ClientCapability::default(),
-                safety_level,
-                candidates,
-                rpc: Rpc::FilterTweets,
-            }))
+        let request = ingress::filter_tweets_batch(
+            self.post_evaluator.rule_engine(),
+            &self.client_switches,
+            request.viewer,
+            safety_level,
+            request.rows,
+        );
+        let (_, outcomes) = context
+            .scope(self.post_evaluator.run(request, &metrics, &mut NoTrace))
             .await;
-        ft_metrics::record_verdicts(
-            Rpc::FilterTweets,
-            safety_level,
-            response
-                .outcomes
-                .iter()
-                .map(|outcome| outcome.evaluation.verdict()),
-        );
-        ft_metrics::record_unresolved(
-            Rpc::FilterTweets,
-            safety_level,
-            response.outcomes.iter().map(|outcome| &outcome.evaluation),
-        );
-        ft_metrics::record_fail_open_defaults(
-            Rpc::FilterTweets,
-            safety_level,
-            response
-                .outcomes
-                .iter()
-                .map(|outcome| outcome.evaluation.fail_open_defaults()),
+        ft_metrics::record_sent(
+            &metrics,
+            outcomes.iter().map(|outcome| &outcome.evaluation),
+            0,
         );
 
         if let Some(finish_comparison) = finish_comparison {
-            finish_comparison(&response.outcomes);
+            finish_comparison(&outcomes);
         }
 
-        let results = response
-            .outcomes
+        let results = outcomes
             .into_iter()
-            .map(to_visibility_result)
+            .map(treatment::filter_tweets_result)
             .collect();
 
         Ok(Response::new(vf_pb::VisibilityFilterResponse { results }))
-    }
-}
-
-pub(crate) fn normalize_viewer_id(raw: Option<u64>) -> Option<u64> {
-    raw.filter(|&id| id.cast_signed() > 0)
-}
-
-pub(crate) fn parse_grpc_timeout(metadata: &MetadataMap) -> Option<Duration> {
-    let raw = metadata.get("grpc-timeout")?.to_str().ok()?;
-    let (digits, unit) = raw.split_at(raw.len().checked_sub(1)?);
-    if digits.is_empty() || digits.len() > 8 || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let value: u64 = digits.parse().ok()?;
-    let nanos_per_unit = match unit {
-        "H" => 3_600_000_000_000,
-        "M" => 60_000_000_000,
-        "S" => 1_000_000_000,
-        "m" => 1_000_000,
-        "u" => 1_000,
-        "n" => 1,
-        _ => return None,
-    };
-    Some(Duration::from_nanos(value.checked_mul(nanos_per_unit)?))
-}
-
-fn to_visibility_result(outcome: PostEvaluation) -> vf_pb::TweetVisibilityResult {
-    let (action, filtered_reason) = treatment::proto_action(outcome.evaluation.into_verdict());
-    vf_pb::TweetVisibilityResult {
-        tweet_id: outcome.tweet_id.0,
-        action: Some(action),
-        filtered_reason,
-        safety_labels: outcome.safety_labels,
     }
 }
 
@@ -166,6 +103,7 @@ mod tests {
     use super::*;
     use crate::hydration::inventory::Source;
     use crate::hydration::sources::InMemorySources;
+    use crate::metrics::Metrics;
     use crate::rules::RuleEngine;
     use std::sync::Mutex;
 
@@ -176,7 +114,9 @@ mod tests {
                 Arc::<InMemorySources>::clone(&sources),
                 RuleEngine::for_tests(),
                 Arc::default(),
+                Metrics::none(),
             )),
+            ClientSwitches::for_tests(),
             None,
         );
         let response = endpoint
@@ -213,12 +153,10 @@ mod tests {
     impl Comparator for ViewerIds {
         fn begin(
             &self,
-            viewer_id: Option<u64>,
-            _country_code: Option<String>,
+            viewer: &RequestViewer,
             _safety_level: SafetyLevel,
-            _tweet_ids: Vec<u64>,
         ) -> Option<FinishComparison> {
-            self.0.lock().unwrap().push(viewer_id);
+            self.0.lock().unwrap().push(viewer.id());
             None
         }
     }
@@ -232,7 +170,9 @@ mod tests {
                 Arc::new(InMemorySources::default()),
                 RuleEngine::for_tests(),
                 Arc::default(),
+                Metrics::none(),
             )),
+            ClientSwitches::for_tests(),
             Some(Box::new(viewer_ids)),
         );
         for viewer_id in [Some(0), Some(42)] {
@@ -258,17 +198,18 @@ mod tests {
     impl Comparator for FinishedResults {
         fn begin(
             &self,
-            _viewer_id: Option<u64>,
-            _country_code: Option<String>,
+            _viewer: &RequestViewer,
             _safety_level: SafetyLevel,
-            _tweet_ids: Vec<u64>,
         ) -> Option<FinishComparison> {
             let finished = Arc::clone(&self.0);
             Some(Box::new(move |outcomes: &[PostEvaluation]| {
-                finished
-                    .lock()
-                    .unwrap()
-                    .push(outcomes.iter().cloned().map(to_visibility_result).collect());
+                finished.lock().unwrap().push(
+                    outcomes
+                        .iter()
+                        .cloned()
+                        .map(treatment::filter_tweets_result)
+                        .collect(),
+                );
             }))
         }
     }
@@ -282,7 +223,9 @@ mod tests {
                 Arc::new(InMemorySources::default()),
                 RuleEngine::for_tests(),
                 Arc::default(),
+                Metrics::none(),
             )),
+            ClientSwitches::for_tests(),
             Some(Box::new(comparator)),
         );
         let served = endpoint
@@ -302,27 +245,5 @@ mod tests {
             .into_inner()
             .results;
         assert_eq!(*finished.lock().unwrap(), vec![served]);
-    }
-
-    #[test]
-    fn parse_grpc_timeout_units_and_garbage() {
-        let parsed = |value: &str| {
-            let mut metadata = MetadataMap::new();
-            metadata.insert("grpc-timeout", value.parse().unwrap());
-            parse_grpc_timeout(&metadata)
-        };
-        assert_eq!(parsed("400m"), Some(Duration::from_millis(400)));
-        assert_eq!(parsed("1S"), Some(Duration::from_secs(1)));
-        assert_eq!(parsed("2M"), Some(Duration::from_secs(120)));
-        assert_eq!(parsed("500u"), Some(Duration::from_micros(500)));
-        assert_eq!(parsed("3H"), Some(Duration::from_secs(10_800)));
-        assert_eq!(parsed("9n"), Some(Duration::from_nanos(9)));
-        assert_eq!(parsed("400"), None);
-        assert_eq!(parsed("m"), None);
-        assert_eq!(parsed("400x"), None);
-        assert_eq!(parsed("+400m"), None);
-        assert_eq!(parsed("12345678m"), Some(Duration::from_millis(12_345_678)));
-        assert_eq!(parsed("123456789m"), None);
-        assert_eq!(parse_grpc_timeout(&MetadataMap::new()), None);
     }
 }

@@ -6,7 +6,7 @@ use xai_manhattan::s2s::S2sConfig;
 use xai_manhattan::{Key, LkeySelector, ManhattanError, NativeManhattanClient, Tenant};
 use xai_safety_label_store::types::encode_pkey;
 
-use super::codec::{LkeyBytes, MvalBytes, RawSafetyLabel};
+use super::decode::RawSafetyLabel;
 
 const SCAN_LIMIT: u32 = 512;
 const DEFAULT_TIMEOUT: Duration = Duration::from_millis(200);
@@ -87,10 +87,7 @@ impl ManhattanLabelFetcher for MhLabelClient {
                                 }
                             };
                             let mval = item.value().into_bytes();
-                            Some(RawSafetyLabel {
-                                lkey: LkeyBytes(lkey),
-                                mval: MvalBytes(mval),
-                            })
+                            Some(RawSafetyLabel { lkey, mval })
                         })
                         .collect()
                 })

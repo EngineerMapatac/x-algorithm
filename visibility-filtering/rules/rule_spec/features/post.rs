@@ -1,6 +1,6 @@
-use super::{Feature, Leaf, Meaning};
+use super::{Feature, Leaf, Meaning, Reads};
 use crate::hydration::{Hydrator, Hydrators};
-use crate::models::{SafetyLabelMap, SafetyLabelType};
+use crate::models::{PostCandidate, SafetyLabelMap, SafetyLabelType};
 use crate::rules::context::{At, PostCoreFacts};
 use crate::rules::rule_spec::rule::RuleCond;
 use crate::rules::rule_spec::{spelled_label, Predicate, Truth};
@@ -11,7 +11,9 @@ pub(in crate::rules) enum PostFacts {}
 impl Feature for PostFacts {
     const REQUIRED: Hydrators = Hydrators::empty();
     type Value<'a> = PostCoreFacts<'a>;
+}
 
+impl Reads<PostCandidate> for PostFacts {
     #[inline]
     fn read<'a>(at: At<'_, 'a>) -> PostCoreFacts<'a> {
         at.post_facts()
@@ -21,7 +23,6 @@ impl Feature for PostFacts {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub enum PostFactsLeaf {
-    ViewerIsAuthor,
     TweetCreatedAfter(u64),
 }
 
@@ -31,9 +32,6 @@ impl Leaf for PostFactsLeaf {
     #[inline]
     fn meaning<'a, M: Meaning<'a, PostFacts>>(self, m: M) -> M::Out {
         match self {
-            Self::ViewerIsAuthor => {
-                m.run(|post, facts| facts.viewer_id() == Some(post.author_id()))
-            }
             Self::TweetCreatedAfter(unix_ms) => {
                 m.run_with(unix_ms, |post, _| post.created_after(unix_ms))
             }
@@ -52,7 +50,9 @@ pub(in crate::rules) enum SourceTweetId {}
 impl Feature for SourceTweetId {
     const REQUIRED: Hydrators = Hydrators::of(Hydrator::PureCore);
     type Value<'a> = Option<u64>;
+}
 
+impl Reads<PostCandidate> for SourceTweetId {
     #[inline]
     fn read<'a>(at: At<'_, 'a>) -> Option<u64> {
         at.post().source_tweet_id
@@ -87,7 +87,9 @@ pub(in crate::rules) enum TweetSafetyLabels {}
 impl Feature for TweetSafetyLabels {
     const REQUIRED: Hydrators = Hydrators::of(Hydrator::TweetSafetyLabels);
     type Value<'a> = &'a SafetyLabelMap;
+}
 
+impl Reads<PostCandidate> for TweetSafetyLabels {
     #[inline]
     fn read<'a>(at: At<'_, 'a>) -> &'a SafetyLabelMap {
         &at.post().safety_labels
@@ -132,7 +134,9 @@ pub(in crate::rules) enum ReplyControl {}
 impl Feature for ReplyControl {
     const REQUIRED: Hydrators = Hydrators::of(Hydrator::ConversationControl);
     type Value<'a> = Option<&'a ConversationControl>;
+}
 
+impl Reads<PostCandidate> for ReplyControl {
     #[inline]
     fn read<'a>(at: At<'_, 'a>) -> Option<&'a ConversationControl> {
         let features = at.post().conversation_control.as_ref();

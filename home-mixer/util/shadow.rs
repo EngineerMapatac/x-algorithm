@@ -1,10 +1,14 @@
-use crate::params::{ShadowTrafficDefaultPercent, ShadowTrafficPhoenixClusterRates};
+use crate::params::{
+    ShadowTrafficDefaultPercent, ShadowTrafficPhoenixClusterAggregationTypes,
+    ShadowTrafficPhoenixClusterRates,
+};
 use strum::VariantArray;
 use xai_candidate_pipeline::component_library::clients::phoenix_prediction_client::{
     PhoenixCluster, Surface,
 };
 use xai_candidate_pipeline::component_library::utils::is_sampled;
 use xai_feature_switches::Params;
+use xai_recsys_proto::UserActionAggregationType;
 
 pub fn shadow_rate_for_cluster(params: &Params, cluster: PhoenixCluster) -> f64 {
     let cluster_name = format!("{cluster:?}");
@@ -28,21 +32,40 @@ pub fn shadow_rate_for_cluster(params: &Params, cluster: PhoenixCluster) -> f64 
         })
 }
 
+pub fn shadow_aggregation_type_for_cluster(
+    params: &Params,
+    cluster: PhoenixCluster,
+) -> Option<UserActionAggregationType> {
+    let cluster_name = format!("{cluster:?}");
+    let overrides: Vec<String> = params.get(ShadowTrafficPhoenixClusterAggregationTypes);
+    overrides.iter().find_map(|entry| {
+        let (name, aggregation_type) = entry.split_once(':')?;
+        if name.trim() == cluster_name {
+            UserActionAggregationType::from_str_name(aggregation_type.trim())
+        } else {
+            None
+        }
+    })
+}
+
 pub fn is_shadow_sampled_for_cluster(
     params: &Params,
-    request_id: u64,
+    prediction_request_id: u64,
     cluster: PhoenixCluster,
 ) -> bool {
     if !cluster.is_shadow_eligible_for(Surface::Home) {
         return false;
     }
-    is_sampled(request_id, shadow_rate_for_cluster(params, cluster))
+    is_sampled(
+        prediction_request_id,
+        shadow_rate_for_cluster(params, cluster),
+    )
 }
 
-pub fn is_shadow_traffic(params: &Params, request_id: u64) -> bool {
+pub fn is_shadow_traffic(params: &Params, prediction_request_id: u64) -> bool {
     PhoenixCluster::VARIANTS
         .iter()
-        .any(|&cluster| is_shadow_sampled_for_cluster(params, request_id, cluster))
+        .any(|&cluster| is_shadow_sampled_for_cluster(params, prediction_request_id, cluster))
 }
 
 #[cfg(test)]

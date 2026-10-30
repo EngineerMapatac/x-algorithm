@@ -5,6 +5,7 @@ use crate::models::fs_recipient::FsRecipientInputs;
 use crate::models::in_network_reply::{serialize_in_network_replies, InNetworkReplies};
 use crate::models::user_features::UserFeatures;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use xai_candidate_pipeline::candidate_pipeline::PipelineQuery;
@@ -12,7 +13,7 @@ use xai_core_entities::entities::SubscriptionLevel;
 use xai_decider::Decider;
 use xai_feature_switches::Params;
 use xai_recsys_proto::gender_prediction::InferredGenderLabel;
-use xai_recsys_proto::{DeviceNetworkType, Timezone};
+use xai_recsys_proto::{DeviceNetworkType, RecentSearchQueries, Timezone};
 use xai_twittercontext_proto::{GetTwitterContextViewer, TwitterContextViewer};
 use xai_urt_thrift::cursor::UrtOrderedCursor;
 use xai_x_thrift::non_polling_timestamps::NonPollingTimestamps;
@@ -59,6 +60,10 @@ pub struct ScoredPostsQuery {
     pub scoring_sequence: Option<xai_recsys_proto::UserActionSequence>,
     #[serde(skip)]
     pub columnar_scoring_sequence: Option<bytes::Bytes>,
+    #[serde(skip)]
+    pub history_topics: Option<xai_vm_ranker_proto::experiment::HistoryTopics>,
+    #[serde(skip)]
+    pub stats_history_topics: Option<xai_vm_ranker_proto::experiment::HistoryTopics>,
     #[serde(skip)]
     pub immersive_columnar_scoring_sequence: Option<bytes::Bytes>,
     #[serde(skip)]
@@ -109,6 +114,8 @@ pub struct ScoredPostsQuery {
     pub implicit_engagement_signals: Option<EngagementSignalsByType>,
     #[serde(serialize_with = "serialize_debug")]
     pub user_installed_apps: Option<Vec<bool>>,
+    #[serde(skip)]
+    pub recent_search_queries: Option<RecentSearchQueries>,
     pub subscription_level: Option<SubscriptionLevel>,
     pub is_shadow_traffic: bool,
     pub is_under_the_hood_request: bool,
@@ -133,6 +140,8 @@ pub struct ScoredPostsQuery {
     pub ad_drops: Arc<AdDrops>,
     #[serde(serialize_with = "serialize_debug")]
     pub video_carousel: Arc<OnceLock<Vec<PostCandidate>>>,
+    #[serde(skip)]
+    pub served_post_score_infos: Arc<OnceLock<HashMap<u64, xai_recsys_proto::ScoreInfo>>>,
 }
 
 pub use xai_candidate_pipeline::component_library::clients::strato_client::UserDemographics;
@@ -185,6 +194,8 @@ impl ScoredPostsQuery {
             bloom_filter_entries: vec![],
             scoring_sequence: None,
             columnar_scoring_sequence: None,
+            history_topics: None,
+            stats_history_topics: None,
             immersive_columnar_scoring_sequence: None,
             retrieval_sequence: None,
             columnar_retrieval_sequence: None,
@@ -228,6 +239,7 @@ impl ScoredPostsQuery {
             explicit_engagement_signals: None,
             implicit_engagement_signals: None,
             user_installed_apps: None,
+            recent_search_queries: None,
             subscription_level,
             is_shadow_traffic,
             is_under_the_hood_request: false,
@@ -246,6 +258,7 @@ impl ScoredPostsQuery {
             following_pagination_meta: Arc::new(OnceLock::new()),
             ad_drops: Arc::default(),
             video_carousel: Arc::new(OnceLock::new()),
+            served_post_score_infos: Arc::new(OnceLock::new()),
         }
     }
 

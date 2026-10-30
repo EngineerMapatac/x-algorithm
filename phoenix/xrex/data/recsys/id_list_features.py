@@ -30,6 +30,8 @@ class IdListFamily(enum.Enum):
     TOP_CONVERSION_AUTHOR = "top_conversion_author"
     SEQ_POST = "seq_post"
     SEQ_AUTHOR = "seq_author"
+    TOP_ORGANIC_POST = "top_organic_post"
+    SEQ_ORGANIC_POST = "seq_organic_post"
 
     @property
     def is_author(self) -> bool:
@@ -39,8 +41,14 @@ class IdListFamily(enum.Enum):
             IdListFamily.SEQ_AUTHOR,
         )
 
+    @property
+    def is_organic_post(self) -> bool:
+        return self in (IdListFamily.TOP_ORGANIC_POST, IdListFamily.SEQ_ORGANIC_POST)
+
 
 def family_of(name: str) -> IdListFamily:
+    if is_history_list(name):
+        return parse_history_list(name).family
     if name.startswith("top_cp_"):
         return IdListFamily.TOP_CONVERSION_POST
     if name.startswith("top_cau_"):
@@ -56,11 +64,162 @@ def family_of(name: str) -> IdListFamily:
     raise ValueError(f"unknown id-list feature name: {name!r}")
 
 
+_K_IN_NAME_RE = re.compile(
+    r"^(?:hist_)?(?:top_(?:p|au|pau|cp|cau|ap|op)|latest_(?:p|au|pau|cau|ap|op|cp)|longest_dwell_p)_(\d+)_"
+)
+
+
 def default_k(name: str) -> int:
-    m = re.match(r"^(?:top_(?:p|au|cp|cau)|latest_(?:p|au)|longest_dwell_p)_(\d+)_", name)
+    m = _K_IN_NAME_RE.match(name)
     if m is None:
         raise ValueError(f"cannot infer k from id-list feature name: {name!r}")
     return int(m.group(1))
+
+
+def feature_name_for(name: str, k: int) -> str:
+    m = _K_IN_NAME_RE.match(name)
+    if m is None:
+        return name
+    return name[: m.start(1)] + str(k) + name[m.end(1) :]
+
+
+def identity_for(name: str) -> str:
+    m = _K_IN_NAME_RE.match(name)
+    if m is None:
+        return name
+    return name[: m.start(1)] + name[m.end(1) + 1 :]
+
+
+def source_cap(name: str) -> int | None:
+    if is_history_list(name):
+        return None
+    m = _K_IN_NAME_RE.match(name)
+    return int(m.group(1)) if m else None
+
+
+HIST_PREFIX = "hist_"
+
+HISTORY_EVENTS: frozenset[str] = frozenset(
+    {
+        "FAV",
+        "REPLY",
+        "RETWEET",
+        "QUOTE",
+        "FOLLOW_AUTHOR",
+        "BOOKMARK",
+        "TAKE_SCREENSHOT",
+        "CLICK",
+        "CLICK_PROFILE",
+        "OPEN_LINK",
+        "PHOTO_EXPAND",
+        "SHOW_MORE_EXPAND",
+        "CLICK_HASHTAG",
+        "CLICK_MENTION",
+        "QUOTED_TWEET_CLICK",
+        "TRANSLATE_CLICK",
+        "CLICK_GROK_ANALYZE",
+        "EXTERNAL_LINK_SESSION",
+        "EXTERNAL_LINK_LONG_DWELLED",
+        "VIDEO_QUALITY_VIEW",
+        "RECAP_DWELLED",
+        "SHARE",
+        "RESHARE",
+        "ENGAGE",
+        "BRAND_ENGAGE",
+        "CAROUSEL_SWIPE",
+        "ADS_SESSION_CONVERSION",
+        "ADS_SITE_VISIT_CONVERSION",
+        "ADS_LONG_SITE_DWELL_CONVERSION",
+        "ADS_LANDING_PAGE_VIEW_CONVERSION",
+        "ADS_PURCHASE_CONVERSION",
+        "ADS_CONTENT_VIEW_CONVERSION",
+        "ADS_SIGN_UP_CONVERSION",
+        "ADS_CUSTOM_CONVERSION",
+        "ADS_ADD_TO_CART_CONVERSION",
+        "CUSTOM_SIGNUP_ADDTOCART",
+        "OTHER_CONVERSION",
+        "ANY_CONVERSION",
+    }
+)
+
+ENTITIES = ("au", "pau", "cau", "ap", "op", "cp")
+_AUTHOR_ENTITIES = ("au", "pau", "cau")
+_PROMOTED_ENTITIES = ("pau", "cau", "ap", "cp")
+_ORGANIC_ENTITIES = ("op",)
+
+_HIST_NAME_RE = re.compile(
+    r"^hist_(?P<kind>top|latest)_(?P<entity>au|pau|cau|ap|op|cp)_(?P<k>\d+)_"
+    r"(?:(?P<window>\d+)(?P<unit>d|hr|h)_)?(?P<event>[A-Z][A-Z0-9_]*)$"
+)
+
+_HIST_FAMILY = {
+    ("top", "au"): IdListFamily.TOP_AUTHOR,
+    ("top", "pau"): IdListFamily.TOP_AUTHOR,
+    ("latest", "au"): IdListFamily.SEQ_AUTHOR,
+    ("latest", "pau"): IdListFamily.SEQ_AUTHOR,
+    ("top", "cau"): IdListFamily.TOP_CONVERSION_AUTHOR,
+    ("latest", "cau"): IdListFamily.TOP_CONVERSION_AUTHOR,
+    ("top", "ap"): IdListFamily.TOP_POST,
+    ("latest", "ap"): IdListFamily.SEQ_POST,
+    ("top", "cp"): IdListFamily.TOP_CONVERSION_POST,
+    ("latest", "cp"): IdListFamily.TOP_CONVERSION_POST,
+    ("top", "op"): IdListFamily.TOP_ORGANIC_POST,
+    ("latest", "op"): IdListFamily.SEQ_ORGANIC_POST,
+}
+
+
+def is_history_list(name: str) -> bool:
+    return name.startswith(HIST_PREFIX)
+
+
+@dataclasses.dataclass(frozen=True)
+class HistoryListSpec:
+    name: str
+    kind: str
+    entity: str
+    k: int
+    window_days: float | None
+    event: str
+
+    @property
+    def family(self) -> IdListFamily:
+        return _HIST_FAMILY[(self.kind, self.entity)]
+
+    @property
+    def is_author(self) -> bool:
+        return self.entity in _AUTHOR_ENTITIES
+
+    @property
+    def promoted_only(self) -> bool:
+        return self.entity in _PROMOTED_ENTITIES
+
+    @property
+    def organic_only(self) -> bool:
+        return self.entity in _ORGANIC_ENTITIES
+
+
+def parse_history_list(name: str) -> HistoryListSpec:
+    m = _HIST_NAME_RE.match(name)
+    if m is None:
+        raise ValueError(
+            f"not a history id-list name: {name!r} (expected "
+            "hist_(top|latest)_(au|pau|cau|ap|op|cp)_<k>_[<window>_]<EVENT>)"
+        )
+    event = m.group("event")
+    if event not in HISTORY_EVENTS:
+        raise ValueError(f"{name}: unknown event {event!r}; known: {sorted(HISTORY_EVENTS)}")
+    window = None
+    if m.group("window"):
+        n = float(m.group("window"))
+        window = n if m.group("unit") == "d" else n / 24.0
+    return HistoryListSpec(
+        name=name,
+        kind=m.group("kind"),
+        entity=m.group("entity"),
+        k=int(m.group("k")),
+        window_days=window,
+        event=event,
+    )
 
 
 @dataclasses.dataclass(frozen=True)
@@ -74,10 +233,28 @@ class IdListFeatureSpec:
         if self.name != self.name.strip() or not self.name:
             raise ValueError(f"id-list feature name has surrounding whitespace: {self.name!r}")
         family_of(self.name)
+        cap = source_cap(self.name)
+        if cap is not None and self.k > cap:
+            raise ValueError(
+                f"{self.name}: k={self.k} exceeds the {cap} ids the hydrator writes per list; "
+                "the extra slots could never fill"
+            )
 
     @property
     def family(self) -> IdListFamily:
         return family_of(self.name)
+
+    @property
+    def is_history(self) -> bool:
+        return is_history_list(self.name)
+
+    @property
+    def feature_name(self) -> str:
+        return feature_name_for(self.name, self.k)
+
+    @property
+    def identity(self) -> str:
+        return identity_for(self.name)
 
 
 def parse_spec(spec: str) -> IdListFeatureSpec:
@@ -93,6 +270,9 @@ def parse_specs(specs: Sequence[str] | str) -> tuple[IdListFeatureSpec, ...]:
     names = [s.name for s in out]
     if len(set(names)) != len(names):
         raise ValueError(f"duplicate id-list feature names: {names}")
+    features = [s.feature_name for s in out]
+    if len(set(features)) != len(features):
+        raise ValueError(f"duplicate id-list feature names after k substitution: {features}")
     return out
 
 
@@ -301,6 +481,35 @@ def fill_rates(mask: np.ndarray, specs: Sequence[IdListFeatureSpec]) -> dict[str
     offsets = slot_offsets(specs)
     rows = max(mask.shape[0], 1)
     return {
-        s.name: float(mask[:, offsets[i] : offsets[i + 1]].any(axis=1).sum()) / rows
+        s.feature_name: float(mask[:, offsets[i] : offsets[i + 1]].any(axis=1).sum()) / rows
         for i, s in enumerate(specs)
     }
+
+
+def fill_stats(
+    mask: np.ndarray, specs: Sequence[IdListFeatureSpec]
+) -> dict[str, tuple[float, float, float]]:
+    offsets = slot_offsets(specs)
+    rows = max(mask.shape[0], 1)
+    out = {}
+    for i, s in enumerate(specs):
+        m = mask[:, offsets[i] : offsets[i + 1]]
+        counts = m.sum(axis=1)
+        out[s.feature_name] = (
+            float((counts > 0).sum()) / rows,
+            float((counts >= s.k).sum()) / rows,
+            float(counts.sum()) / (rows * s.k),
+        )
+    return out
+
+
+def fill_warnings(stats: dict[str, tuple[float, float, float]]) -> list[str]:
+    out = []
+    for name, (nonempty, full, _) in stats.items():
+        if full > 0.95:
+            out.append(
+                f"{name}: full for {full:.0%} of users; k caps the list, consider raising it"
+            )
+        if nonempty < 0.05:
+            out.append(f"{name}: non-empty for only {nonempty:.1%} of users; consider dropping it")
+    return out

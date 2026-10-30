@@ -56,16 +56,20 @@ pub mod config;
 pub mod dark_traffic_setup;
 pub(crate) mod evaluate_tweets;
 pub mod explain;
+pub(crate) mod filter_notifications;
 pub(crate) mod filter_tweets;
 pub(crate) mod get_safety_labels;
 pub(crate) mod hydration;
+pub(crate) mod ingress;
 pub(crate) mod metrics;
 pub(crate) mod models;
 pub mod params;
+#[cfg(test)]
+mod pinned;
 pub(crate) mod post_card;
 pub(crate) mod post_evaluator;
+pub(crate) mod quote;
 pub(crate) mod result_label;
-pub(crate) mod retweet;
 pub(crate) mod rules;
 pub(crate) mod safety_label_source;
 #[cfg(test)]
@@ -73,4 +77,6 @@ mod scenario;
 pub mod server;
 pub(crate) mod server_deps;
 pub mod staging;
+pub(crate) mod thrift_read;
 pub(crate) mod treatment;
+pub mod verdict_gate;

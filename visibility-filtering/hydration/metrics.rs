@@ -1,30 +1,16 @@
 use rustc_hash::FxHashMap;
 use std::hash::Hash;
-use std::time::Duration;
 
 use tracing::debug;
-use xai_stats_receiver::{global_stats_receiver, HistogramBuckets};
 
-use crate::hydration::batch::{Hydrated, HydrationBatch, HydrationError};
+use crate::hydration::batch::{Hydrated, HydrationBatch};
+use crate::hydration::sources::Expired;
+use crate::metrics::families::{
+    FALLBACK_CACHE_KEYS, FALLBACK_CACHE_RESIDENT_KEYS, FLOCK_MISSING_KEYS, HYDRATOR_KEYS,
+    HYDRATOR_LATENCY_MS, HYDRATOR_REQUESTS, HYDRATOR_TWEET_IDS, REQUEST_COUNTRY, VIEWER_COUNTRY,
+};
+use crate::metrics::{Metrics, RequestMetrics};
 use crate::params::CountryList;
-use crate::rules::SafetyLevel;
-
-const HYDRATOR_REQUESTS: &str = "vf_hydrator_requests";
-const HYDRATOR_LATENCY_MS: &str = "vf_hydrator_latency_ms";
-const HYDRATOR_KEYS: &str = "vf_hydrator_keys";
-const HYDRATOR_TWEET_IDS: &str = "vf_hydrator_tweet_ids";
-const HYDRATOR_BATCH_SIZE: &str = "vf_hydrator_batch_size";
-const HYDRATOR_EXPANDED_BATCHES: &str = "vf_hydrator_expanded_batches";
-const HYDRATOR_EXPANDED_KEYS: &str = "vf_hydrator_expanded_keys";
-const HYDRATOR_UNASKED_KEYS: &str = "vf_hydrator_unasked_keys";
-const FALLBACK_CACHE_KEYS: &str = "vf_fallback_cache_keys";
-const FALLBACK_CACHE_ENTRIES: &str = "vf_fallback_cache_entries";
-const FALLBACK_CACHE_RESIDENT_KEYS: &str = "vf_fallback_cache_resident_keys";
-const VIEWER_COUNTRY: &str = "vf_viewer_country";
-const VIEWER_STATE: &str = "vf_viewer_state";
-const REQUEST_COUNTRY: &str = "vf_request_country";
-const VIEWER_NOT_AGE_VERIFIED: &str = "vf_viewer_not_age_verified";
-const FLOCK_MISSING_KEYS: &str = "vf_flock_missing_keys";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr, strum::VariantArray)]
 #[strum(serialize_all = "snake_case")]
@@ -81,17 +67,21 @@ impl KeyedResultCounts {
                     counts.partial_keys += 1;
                     counts.partial_candidates += candidate_count;
                 }
-                Some(Hydrated::Failed(HydrationError::Timeout)) => {
-                    counts.timeout_keys += 1;
-                    counts.timeout_candidates += candidate_count;
-                }
-                _ => {
+                Some(Hydrated::Failed | Hydrated::Unanswered) | None => {
                     counts.error_keys += 1;
                     counts.error_candidates += candidate_count;
                 }
             }
         }
         counts
+    }
+
+    fn timed_out<K>(candidate_count_by_claimed_key: &FxHashMap<K, usize>) -> Self {
+        Self {
+            timeout_keys: candidate_count_by_claimed_key.len(),
+            timeout_candidates: candidate_count_by_claimed_key.values().sum(),
+            ..Self::default()
+        }
     }
 
     fn outcome(self) -> HydratorOutcome {
@@ -107,21 +97,24 @@ impl KeyedResultCounts {
 }
 
 pub(crate) fn record_keyed_hydrator_request<K, V>(
-    client: &str,
-    method: &str,
-    safety_level: SafetyLevel,
+    metrics: &RequestMetrics,
+    backend: &str,
+    call: &str,
     candidate_count_by_claimed_key: &FxHashMap<K, usize>,
-    answer: &impl AsRef<[HydrationBatch<K, V>]>,
+    answer: Result<&impl AsRef<[HydrationBatch<K, V>]>, &Expired>,
     latency_ms: f64,
 ) where
     K: Eq + Hash,
 {
-    let counts = KeyedResultCounts::from_batch(candidate_count_by_claimed_key, answer);
+    let counts = match answer {
+        Ok(answer) => KeyedResultCounts::from_batch(candidate_count_by_claimed_key, answer),
+        Err(Expired) => KeyedResultCounts::timed_out(candidate_count_by_claimed_key),
+    };
     let outcome = counts.outcome();
     if outcome != HydratorOutcome::Success {
         debug!(
-            client,
-            method,
+            backend,
+            call,
             outcome = <&str>::from(outcome),
             success_keys = counts.success_keys,
             partial_keys = counts.partial_keys,
@@ -130,16 +123,7 @@ pub(crate) fn record_keyed_hydrator_request<K, V>(
             "Hydrator fail-open"
         );
     }
-    incr(
-        HYDRATOR_REQUESTS,
-        &[
-            ("client", client),
-            ("method", method),
-            ("outcome", outcome.into()),
-            ("safety_level", safety_level.into()),
-        ],
-        1,
-    );
+    metrics.count(&HYDRATOR_REQUESTS, [backend, call, outcome.into()], 1);
     for (result, keys, candidates) in [
         (
             HydratorOutcome::Success,
@@ -162,55 +146,17 @@ pub(crate) fn record_keyed_hydrator_request<K, V>(
             counts.error_candidates,
         ),
     ] {
-        let labels = [
-            ("client", client),
-            ("method", method),
-            ("result", result.into()),
-            ("safety_level", safety_level.into()),
-        ];
-        incr_nonzero(HYDRATOR_KEYS, &labels, keys as u64);
-        incr_nonzero(HYDRATOR_TWEET_IDS, &labels, candidates as u64);
+        let values = [backend, call, result.into()];
+        metrics.count(&HYDRATOR_KEYS, values, keys as u64);
+        metrics.count(&HYDRATOR_TWEET_IDS, values, candidates as u64);
     }
-    observe(
-        HYDRATOR_LATENCY_MS,
-        &[
-            ("client", client),
-            ("method", method),
-            ("safety_level", safety_level.into()),
-        ],
-        latency_ms,
-        HistogramBuckets::Bucket50To500,
-    );
+    metrics
+        .plain()
+        .observe(&HYDRATOR_LATENCY_MS, [backend, call], latency_ms);
 }
 
-pub(crate) fn record_tes_join_latency(safety_level: SafetyLevel, elapsed: Duration) {
-    observe(
-        HYDRATOR_LATENCY_MS,
-        &[
-            ("client", "tes"),
-            ("method", "join"),
-            ("hydrator", "tes"),
-            ("safety_level", safety_level.into()),
-        ],
-        elapsed.as_secs_f64() * 1000.0,
-        HistogramBuckets::Bucket50To500,
-    );
-}
-
-pub(crate) fn record_viewer_country(result: &'static str, safety_level: SafetyLevel) {
-    incr(
-        VIEWER_COUNTRY,
-        &[("result", result), ("safety_level", safety_level.into())],
-        1,
-    );
-}
-
-pub(crate) fn record_viewer_state(state: &'static str, safety_level: SafetyLevel) {
-    incr(
-        VIEWER_STATE,
-        &[("state", state), ("safety_level", safety_level.into())],
-        1,
-    );
+pub(crate) fn record_viewer_country(metrics: &RequestMetrics, result: &'static str) {
+    metrics.count(&VIEWER_COUNTRY, [result], 1);
 }
 
 const REQUEST_COUNTRY_EXTRA: [&str; 28] = [
@@ -231,60 +177,21 @@ fn request_country_label(request_country: Option<&str>) -> &'static str {
         .unwrap_or("other")
 }
 
-pub(crate) fn record_request_country(request_country: Option<&str>) {
-    incr(
-        REQUEST_COUNTRY,
-        &[("country", request_country_label(request_country))],
-        1,
-    );
-}
-
-pub(crate) fn record_viewer_not_age_verified(country: &'static str, age: &'static str) {
-    incr(
-        VIEWER_NOT_AGE_VERIFIED,
-        &[("country", country), ("age", age)],
+pub(crate) fn record_request_country(metrics: &Metrics, request_country: Option<&str>) {
+    metrics.count(
+        &REQUEST_COUNTRY,
+        [request_country_label(request_country)],
         1,
     );
 }
 
 pub(crate) fn record_flock_missing_keys(
-    client: &str,
-    method: &str,
-    safety_level: SafetyLevel,
+    metrics: &RequestMetrics,
+    backend: &str,
+    call: &str,
     keys: usize,
 ) {
-    incr_nonzero(
-        FLOCK_MISSING_KEYS,
-        &[
-            ("client", client),
-            ("method", method),
-            ("safety_level", safety_level.into()),
-        ],
-        keys as u64,
-    );
-}
-
-pub(crate) fn record_batch_size(client: &str, candidate_count: usize) {
-    observe(
-        HYDRATOR_BATCH_SIZE,
-        &[("client", client)],
-        candidate_count as f64,
-        HistogramBuckets::Bucket50To500,
-    );
-}
-
-pub(crate) fn record_expanded_batch(client: &str, method: &str, keys: usize) {
-    let labels = [("client", client), ("method", method)];
-    incr(HYDRATOR_EXPANDED_BATCHES, &labels, 1);
-    incr_nonzero(HYDRATOR_EXPANDED_KEYS, &labels, keys as u64);
-}
-
-pub(crate) fn record_unasked_keys(client: &str, method: &str, keys: usize) {
-    incr_nonzero(
-        HYDRATOR_UNASKED_KEYS,
-        &[("client", client), ("method", method)],
-        keys as u64,
-    );
+    metrics.count(&FLOCK_MISSING_KEYS, [backend, call], keys as u64);
 }
 
 #[derive(Default)]
@@ -299,75 +206,32 @@ pub(crate) struct FallbackCacheCounts {
 }
 
 impl FallbackCacheCounts {
-    pub(crate) fn record(&self, cache: &'static str, column: &'static str) {
-        let live = self.fresh + self.not_found + self.partial + self.partial_stale;
-        for (metric, result, count) in [
-            (
-                FALLBACK_CACHE_KEYS,
-                FallbackCacheResult::Fresh.into(),
-                self.fresh,
-            ),
-            (
-                FALLBACK_CACHE_KEYS,
-                FallbackCacheResult::Stale.into(),
-                self.stale,
-            ),
-            (
-                FALLBACK_CACHE_KEYS,
-                FallbackCacheResult::NotFound.into(),
-                self.not_found,
-            ),
-            (
-                FALLBACK_CACHE_KEYS,
-                FallbackCacheResult::Partial.into(),
-                self.partial,
-            ),
-            (
-                FALLBACK_CACHE_KEYS,
-                FallbackCacheResult::PartialStale.into(),
-                self.partial_stale,
-            ),
-            (
-                FALLBACK_CACHE_KEYS,
-                FallbackCacheResult::Unavailable.into(),
-                self.unavailable,
-            ),
-            (FALLBACK_CACHE_RESIDENT_KEYS, "resident", self.resident),
-            (FALLBACK_CACHE_RESIDENT_KEYS, "absent", live - self.resident),
+    pub(crate) fn record(&self, metrics: &Metrics, cache: &'static str, column: &'static str) {
+        for (result, count) in [
+            (FallbackCacheResult::Fresh, self.fresh),
+            (FallbackCacheResult::Stale, self.stale),
+            (FallbackCacheResult::NotFound, self.not_found),
+            (FallbackCacheResult::Partial, self.partial),
+            (FallbackCacheResult::PartialStale, self.partial_stale),
+            (FallbackCacheResult::Unavailable, self.unavailable),
         ] {
-            incr_nonzero(
-                metric,
-                &[("cache", cache), ("column", column), ("result", result)],
+            metrics.count(
+                &FALLBACK_CACHE_KEYS,
+                [cache, column, result.into()],
                 count as u64,
             );
         }
-    }
-}
-
-fn incr(metric: &str, labels: &[(&str, &str)], count: u64) {
-    if let Some(sr) = global_stats_receiver() {
-        sr.incr(metric, labels, count);
-    }
-}
-
-fn incr_nonzero(metric: &str, labels: &[(&str, &str)], count: u64) -> bool {
-    if count > 0 {
-        incr(metric, labels, count);
-        true
-    } else {
-        false
-    }
-}
-
-pub(crate) fn record_fallback_cache_entries(cache: &'static str, entries: usize) {
-    if let Some(sr) = global_stats_receiver() {
-        sr.gauge(FALLBACK_CACHE_ENTRIES, &[("cache", cache)], entries as f64);
-    }
-}
-
-fn observe(metric: &str, labels: &[(&str, &str)], value: f64, buckets: HistogramBuckets) {
-    if let Some(sr) = global_stats_receiver() {
-        sr.observe(metric, labels, value, buckets);
+        let live = self.fresh + self.not_found + self.partial + self.partial_stale;
+        for (result, count) in [
+            ("resident", self.resident),
+            ("absent", live - self.resident),
+        ] {
+            metrics.count(
+                &FALLBACK_CACHE_RESIDENT_KEYS,
+                [cache, column, result],
+                count as u64,
+            );
+        }
     }
 }
 
@@ -377,9 +241,11 @@ mod tests {
     use crate::hydration::execute::Reply;
     use crate::hydration::inventory::Source;
     use crate::hydration::store::Store;
-    use crate::models::{ClientCapability, RawCandidate, TweetFeatures, TweetId};
+    use crate::models::{ClientCapability, RawCandidate, RetweetMerge, TweetFeatures, TweetId};
     use crate::rules::RuleEngine;
+    use crate::rules::SafetyLevel;
     use std::collections::HashMap;
+    use std::time::Duration;
 
     #[test]
     fn a_request_country_reads_its_listed_code_other_or_none() {
@@ -398,47 +264,6 @@ mod tests {
                 "{extra} is listed"
             );
         }
-    }
-
-    #[test]
-    fn dashboard_generator_pins_the_key_results_fallback_cache_results_and_viewer_metrics() {
-        let cargo = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/dashboard.py");
-        let ws = "crates/x-product/xai-visibility-filtering-service/scripts/dashboard.py";
-        let path = if std::path::Path::new(cargo).exists() {
-            cargo
-        } else {
-            ws
-        };
-        let dashboard =
-            std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-        assert!(dashboard.contains(&format!(
-            "FALLBACK_CACHE_KEYS_METRIC = \"{FALLBACK_CACHE_KEYS}\""
-        )));
-        assert!(dashboard.contains(&format!("VIEWER_STATE_METRIC = \"{VIEWER_STATE}\"")));
-        assert!(dashboard.contains(&format!("REQUEST_COUNTRY_METRIC = \"{REQUEST_COUNTRY}\"")));
-        assert!(dashboard.contains(&format!(
-            "VIEWER_NOT_AGE_VERIFIED_METRIC = \"{VIEWER_NOT_AGE_VERIFIED}\""
-        )));
-        for result in [
-            FallbackCacheResult::Stale,
-            FallbackCacheResult::Unavailable,
-            FallbackCacheResult::PartialStale,
-            FallbackCacheResult::Partial,
-        ] {
-            let result: &str = result.into();
-            assert!(
-                dashboard.contains(&format!("    \"{result}\": ")),
-                "{result}"
-            );
-        }
-        let key_results: Vec<&str> = <HydratorOutcome as strum::VariantArray>::VARIANTS
-            .iter()
-            .map(|&result| result.into())
-            .collect();
-        assert!(dashboard.contains(&format!(
-            "HYDRATOR_KEY_RESULTS = \"{}\"",
-            key_results.join("|")
-        )));
     }
 
     #[test]
@@ -520,9 +345,19 @@ mod tests {
             tweet_id: TweetId(1),
             request_author_id: None,
         }];
-        let mut store = Store::new(plan, Some(50), ClientCapability::default(), &raw, false);
-        let group = |source| plan.groups().find(|group| group.source == source).unwrap();
-        let tweets = store.offer(group(Source::TesTweet)).unwrap();
+        let mut store = Store::new(
+            plan,
+            Some(50),
+            ClientCapability::default(),
+            &raw,
+            RetweetMerge::Unmerged,
+        );
+        let group = |source| {
+            plan.groups()
+                .find(|group| group.fetcher.source == source)
+                .unwrap()
+        };
+        let tweets = store.offer(group(Source::TesTweetForVisibility)).unwrap();
         let circle = TweetFeatures {
             trusted_friends_list_id: Some(7),
             ..Default::default()
@@ -541,10 +376,7 @@ mod tests {
 
     #[test]
     fn a_claimed_key_no_candidate_counted_still_counts_its_timeout() {
-        let batch: HydrationBatch<u64, u8> = HydrationBatch::timed_out([40, 41]);
-
-        let counts =
-            KeyedResultCounts::from_batch(&FxHashMap::from_iter([(40, 0), (41, 3)]), &batch);
+        let counts = KeyedResultCounts::timed_out(&FxHashMap::from_iter([(40, 0), (41, 3)]));
 
         assert_eq!((counts.timeout_keys, counts.timeout_candidates), (2, 3));
         assert_eq!(counts.outcome(), HydratorOutcome::Timeout);

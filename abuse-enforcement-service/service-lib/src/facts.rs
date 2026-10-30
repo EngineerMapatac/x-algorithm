@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use xai_abuse_proto::enforcement::ScoreResult;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, strum::EnumIter)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, strum::EnumIter,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum EntityType {
     #[default]
@@ -139,29 +141,6 @@ impl Facts {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RequestedActionFacts {
-    pub kind: String,
-    pub perm: bool,
-    pub policy: String,
-    pub labels: Vec<String>,
-    pub ttl_msec: i64,
-    pub head: String,
-}
-
-impl RequestedActionFacts {
-    fn from_proto(a: &xai_abuse_proto::enforcement::RequestedAction) -> Self {
-        Self {
-            kind: a.kind.clone(),
-            perm: a.perm,
-            policy: a.policy.clone(),
-            labels: a.labels.clone(),
-            ttl_msec: a.ttl_msec,
-            head: a.head.clone(),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ScoreFacts {
     pub model_version: String,
@@ -170,10 +149,6 @@ pub struct ScoreFacts {
     pub labels: Vec<String>,
     #[serde(default)]
     pub skip_author_credibility_prechecks: bool,
-    #[serde(default)]
-    pub requested_actions: Vec<RequestedActionFacts>,
-    #[serde(default)]
-    pub policy_version: String,
 }
 
 impl ScoreFacts {
@@ -202,12 +177,6 @@ impl ScoreFacts {
             decoded_actions: take_string("decoded_actions"),
             labels,
             skip_author_credibility_prechecks: score.skip_author_credibility_prechecks,
-            requested_actions: score
-                .requested_actions
-                .iter()
-                .map(RequestedActionFacts::from_proto)
-                .collect(),
-            policy_version: score.policy_version.clone(),
         }
     }
 }
@@ -239,6 +208,7 @@ pub struct GizmoduckFacts {
     pub is_blue_verified: bool,
     pub verified_type: Option<String>,
     pub is_affiliate: bool,
+    pub user_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -447,6 +417,7 @@ fn reconstruct_user_signals(map: &BTreeMap<String, String>) -> UserFacts {
             is_blue_verified: parse_bool(map.get("gizmoduck_is_blue_verified")),
             verified_type: parse_dbg_opt_string(map.get("gizmoduck_verified_type")),
             is_affiliate: parse_bool(map.get("gizmoduck_is_affiliate")),
+            user_type: None,
         }
     } else {
         GizmoduckFacts::default()
@@ -533,73 +504,6 @@ mod tests {
         assert_eq!(f.labels, vec!["RTBot".to_owned(), "content_spammer".into()]);
         assert_eq!(f.model_version, "v_test");
         assert_eq!(f.enforcement_note, "test note");
-    }
-
-    #[test]
-    fn score_facts_projects_requested_actions_and_policy_version() {
-        use xai_abuse_proto::enforcement::RequestedAction;
-        let s = ScoreResult {
-            requested_actions: vec![
-                RequestedAction {
-                    kind: "suspend".into(),
-                    perm: true,
-                    policy: "PlatformManipulation".into(),
-                    labels: vec![],
-                    ttl_msec: 0,
-                    head: "IsSpammer".into(),
-                },
-                RequestedAction {
-                    kind: "label".into(),
-                    perm: false,
-                    policy: String::new(),
-                    labels: vec!["SpamHighRecall".into()],
-                    ttl_msec: 86_400_000,
-                    head: "IsLabelHead".into(),
-                },
-            ],
-            policy_version: "7".into(),
-            ..Default::default()
-        };
-        let f = ScoreFacts::from_score(&s);
-        assert_eq!(f.policy_version, "7");
-        assert_eq!(f.requested_actions.len(), 2);
-        assert_eq!(
-            f.requested_actions[0],
-            RequestedActionFacts {
-                kind: "suspend".into(),
-                perm: true,
-                policy: "PlatformManipulation".into(),
-                labels: vec![],
-                ttl_msec: 0,
-                head: "IsSpammer".into(),
-            }
-        );
-        assert_eq!(f.requested_actions[1].kind, "label");
-        assert_eq!(
-            f.requested_actions[1].labels,
-            vec!["SpamHighRecall".to_owned()]
-        );
-        assert_eq!(f.requested_actions[1].ttl_msec, 86_400_000);
-    }
-
-    #[test]
-    fn score_facts_without_requested_actions_projects_empty() {
-        let f = ScoreFacts::from_score(&ScoreResult::default());
-        assert!(f.requested_actions.is_empty());
-        assert_eq!(f.policy_version, "");
-    }
-
-    #[test]
-    fn score_facts_pre_requested_actions_json_still_deserializes() {
-        let legacy = r#"{
-            "model_version": "v1",
-            "enforcement_note": "",
-            "decoded_actions": "[]",
-            "labels": []
-        }"#;
-        let f: ScoreFacts = serde_json::from_str(legacy).expect("legacy ScoreFacts must parse");
-        assert!(f.requested_actions.is_empty());
-        assert_eq!(f.policy_version, "");
     }
 
     #[test]
@@ -799,6 +703,7 @@ mod tests {
                     is_blue_verified: false,
                     verified_type: Some("Business".into()),
                     is_affiliate: false,
+                    user_type: None,
                 },
                 cred: CredFacts {
                     is_high: Some(false),

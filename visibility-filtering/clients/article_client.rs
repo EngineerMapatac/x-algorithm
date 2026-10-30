@@ -1,9 +1,9 @@
-use anyhow::bail;
+use crate::clients::strato::{self, decode_only};
+use crate::thrift_read::read_fields;
 use std::collections::HashMap;
 use thrift::protocol::{TInputProtocol, TOutputProtocol, TSerializable, TType};
 use xai_strato::strato_thrift::{strato_decode, StratoResult, AUTHORIZATION_ERROR};
 use xai_strato::StratoGrpc;
-use xai_twittercontext_proto::TwitterContextViewer;
 use xai_x_thrift::api_media::ApiMediaKey;
 
 const LIFECYCLE_COLUMN: &str = "article/fields/lifecycleState.ArticleEntity";
@@ -23,22 +23,8 @@ impl ArticleClient {
         &self,
         article_ids: &[u64],
     ) -> HashMap<u64, anyhow::Result<Option<i32>>> {
-        let calls = article_ids
-            .iter()
-            .map(|id| {
-                (
-                    LIFECYCLE_COLUMN.to_owned(),
-                    "fetch".to_owned(),
-                    vec![xai_strato::encode(&(id.cast_signed(), ()))],
-                )
-            })
-            .collect();
-        let replies = self.grpc.batch_call(calls, None).await;
-        article_ids
-            .iter()
-            .copied()
-            .zip(replies.into_iter().map(|reply| decode_lifecycle(&reply?)))
-            .collect()
+        self.fetch_articles(None, article_ids, LIFECYCLE_COLUMN, decode_lifecycle)
+            .await
     }
 
     pub async fn media_entities(
@@ -46,7 +32,7 @@ impl ArticleClient {
         viewer_id: Option<u64>,
         article_ids: &[u64],
     ) -> HashMap<u64, anyhow::Result<Option<bool>>> {
-        self.presence(
+        self.fetch_articles(
             viewer_id,
             article_ids,
             MEDIA_ENTITIES_COLUMN,
@@ -60,7 +46,7 @@ impl ArticleClient {
         viewer_id: Option<u64>,
         article_ids: &[u64],
     ) -> HashMap<u64, anyhow::Result<Option<bool>>> {
-        self.presence(
+        self.fetch_articles(
             viewer_id,
             article_ids,
             COVER_MEDIA_COLUMN,
@@ -69,28 +55,17 @@ impl ArticleClient {
         .await
     }
 
-    async fn presence(
+    async fn fetch_articles<T>(
         &self,
         viewer_id: Option<u64>,
         article_ids: &[u64],
         column: &str,
-        decode: fn(&[u8]) -> anyhow::Result<Option<bool>>,
-    ) -> HashMap<u64, anyhow::Result<Option<bool>>> {
-        let calls = article_ids
+        decode: fn(&[u8]) -> anyhow::Result<Option<T>>,
+    ) -> HashMap<u64, anyhow::Result<Option<T>>> {
+        let keys = article_ids
             .iter()
-            .map(|id| {
-                (
-                    column.to_owned(),
-                    "fetch".to_owned(),
-                    vec![xai_strato::encode(&(id.cast_signed(), ()))],
-                )
-            })
-            .collect();
-        let viewer = viewer_id.map(|user_id| TwitterContextViewer {
-            user_id: user_id.cast_signed(),
-            ..Default::default()
-        });
-        let replies = self.grpc.batch_call(calls, viewer.as_ref()).await;
+            .map(|id| (column, xai_strato::encode(&(id.cast_signed(), ()))));
+        let replies = strato::fetch_each(&self.grpc, keys, viewer_id).await;
         article_ids
             .iter()
             .copied()
@@ -100,32 +75,29 @@ impl ArticleClient {
 }
 
 fn decode_lifecycle(bytes: &[u8]) -> anyhow::Result<Option<i32>> {
-    match strato_decode::<ArticleLifecycleState>(bytes)? {
-        StratoResult::Ok { value, .. } => Ok(value.map(|state| state.lifecycle)),
-        StratoResult::Err { code, message } => bail!("Strato error (code {code}): {message}"),
-    }
+    Ok(strato::decode::<ArticleLifecycleState>(bytes)?.map(|state| state.lifecycle))
 }
 
 fn decode_media_entities(bytes: &[u8]) -> anyhow::Result<Option<bool>> {
-    match strato_decode::<MediaEntitiesPresence>(bytes)? {
-        StratoResult::Ok { value, .. } => Ok(value.map(|presence| presence.0)),
-        StratoResult::Err {
-            code: AUTHORIZATION_ERROR,
-            ..
-        } => Ok(None),
-        StratoResult::Err { code, message } => bail!("Strato error (code {code}): {message}"),
-    }
+    Ok(decode_unless_refused::<MediaEntitiesPresence>(bytes)?.map(|presence| presence.0))
 }
 
 fn decode_cover_media(bytes: &[u8]) -> anyhow::Result<Option<bool>> {
-    match strato_decode::<ApiMediaKey>(bytes)? {
-        StratoResult::Ok { value, .. } => Ok(value.map(|_| true)),
+    Ok(decode_unless_refused::<ApiMediaKey>(bytes)?.map(|_| true))
+}
+
+fn decode_unless_refused<T: TSerializable>(bytes: &[u8]) -> anyhow::Result<Option<T>> {
+    let result = strato_decode::<T>(bytes)?;
+    if matches!(
+        result,
         StratoResult::Err {
             code: AUTHORIZATION_ERROR,
             ..
-        } => Ok(None),
-        StratoResult::Err { code, message } => bail!("Strato error (code {code}): {message}"),
+        }
+    ) {
+        return Ok(None);
     }
+    strato::row(result)
 }
 
 struct MediaEntitiesPresence(bool);
@@ -147,10 +119,7 @@ impl TSerializable for MediaEntitiesPresence {
     }
 
     fn write_to_out_protocol(&self, _proto: &mut dyn TOutputProtocol) -> thrift::Result<()> {
-        Err(thrift::new_protocol_error(
-            thrift::ProtocolErrorKind::NotImplemented,
-            "MediaEntitiesPresence is decode-only",
-        ))
+        Err(decode_only("MediaEntitiesPresence"))
     }
 }
 
@@ -162,21 +131,14 @@ const LIFECYCLE: i16 = 1;
 
 impl TSerializable for ArticleLifecycleState {
     fn read_from_in_protocol(i_prot: &mut dyn TInputProtocol) -> thrift::Result<Self> {
-        i_prot.read_struct_begin()?;
         let mut lifecycle = None;
-        loop {
-            let field = i_prot.read_field_begin()?;
-            if field.field_type == TType::Stop {
-                break;
+        read_fields(i_prot, |i_prot, field| {
+            if field.id != Some(LIFECYCLE) || field.field_type != TType::I32 {
+                return Ok(false);
             }
-            if field.id == Some(LIFECYCLE) && field.field_type == TType::I32 {
-                lifecycle = Some(i_prot.read_i32()?);
-            } else {
-                i_prot.skip(field.field_type)?;
-            }
-            i_prot.read_field_end()?;
-        }
-        i_prot.read_struct_end()?;
+            lifecycle = Some(i_prot.read_i32()?);
+            Ok(true)
+        })?;
         let Some(lifecycle) = lifecycle else {
             return Err(thrift::new_protocol_error(
                 thrift::ProtocolErrorKind::InvalidData,
@@ -187,22 +149,19 @@ impl TSerializable for ArticleLifecycleState {
     }
 
     fn write_to_out_protocol(&self, _o_prot: &mut dyn TOutputProtocol) -> thrift::Result<()> {
-        Err(thrift::new_protocol_error(
-            thrift::ProtocolErrorKind::NotImplemented,
-            "ArticleLifecycleState is decode-only",
-        ))
+        Err(decode_only("ArticleLifecycleState"))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clients::strato_answer::Thrift::{Struct, I32, I64};
+    use crate::clients::strato::answer::Thrift::{Struct, I32, I64};
     use thrift::protocol::TBinaryInputProtocol;
 
     #[test]
     fn media_presence_reads_sets_and_keys_without_retaining_their_payloads() {
-        use crate::clients::strato_answer::{found, no_row, Thrift};
+        use crate::clients::strato::answer::{found, no_row, Thrift};
         use Thrift::Set;
         let key = || Struct(vec![(1, Struct(vec![(1, I64(7)), (2, I64(0))]))]);
         assert_eq!(
@@ -224,7 +183,7 @@ mod tests {
 
     #[test]
     fn media_errors_and_malformed_keys_are_not_missing_rows() {
-        use crate::clients::strato_answer::{found, strato_error, Thrift};
+        use crate::clients::strato::answer::{found, strato_error, Thrift};
         use Thrift::Set;
         for decode in [decode_media_entities, decode_cover_media] {
             assert!(decode(&strato_error(5, "failed fetch")).is_err());
@@ -250,7 +209,7 @@ mod tests {
 
     #[test]
     fn an_article_the_viewer_may_not_read_has_no_media() {
-        use crate::clients::strato_answer::strato_error;
+        use crate::clients::strato::answer::strato_error;
         for decode in [decode_media_entities, decode_cover_media] {
             for reason in [
                 "Only subscribers have access",

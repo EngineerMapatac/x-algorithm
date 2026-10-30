@@ -824,7 +824,7 @@ class Trainer(Config):
 
     def checksum_dict(self):
         unwrapped_state = unwrap_tree(self.state)
-        checksums = self.compute_checksums_jit(unwrapped_state)
+        checksums = jax.device_get(self.compute_checksums_jit(unwrapped_state))
         return checksum.get_checksum_dict(
             unwrapped_state,
             self.state_sharding,
@@ -1582,6 +1582,7 @@ class Trainer(Config):
 
             awaiting_processing = None
             for soft_step in itertools.count():
+                self.before_stop_check(soft_step)
                 reason = stop_reason(int(awaiting_processing is not None))
                 if reason is not None:
                     break
@@ -1602,6 +1603,9 @@ class Trainer(Config):
 
         checkpointing.wait_until_finished()
         ctx.on_step({}, metrics_utils.pop())
+
+    def before_stop_check(self, soft_step: int) -> None:
+        pass
 
     def handle_profiler(self, soft_step: int, block_tensor: jax.Array) -> None:
         if self.jax_profile and jax.process_index() == self.jax_profile_rank:

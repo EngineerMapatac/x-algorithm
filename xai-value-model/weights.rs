@@ -24,7 +24,7 @@ pub struct ValueModelWeights {
     pub follow_author: f64,
     pub post_unexplored: f64,
     pub post_unexplored_include_out_of_network: bool,
-    pub react_with_video: f64,
+    pub post_video: f64,
     pub not_interested: f64,
     pub block_author: f64,
     pub mute_author: f64,
@@ -66,7 +66,7 @@ impl ValueModelWeights {
             + self.quoted_vqv
             + self.follow_author
             + self.post_unexplored
-            + self.react_with_video
+            + self.post_video
     }
 
     pub fn negative_sum(&self) -> f64 {
@@ -134,7 +134,7 @@ impl ValueModelWeights {
             ("profile_visit_secs", &mut self.profile_visit_secs),
             ("follow_author", &mut self.follow_author),
             ("post_unexplored", &mut self.post_unexplored),
-            ("react_with_video", &mut self.react_with_video),
+            ("post_video", &mut self.post_video),
             ("not_interested", &mut self.not_interested),
             ("block_author", &mut self.block_author),
             ("mute_author", &mut self.mute_author),
@@ -165,6 +165,7 @@ impl ValueModelWeights {
                 ("follow_author", self.follow_author),
                 ("post_unexplored", self.post_unexplored),
                 ("pdwell", self.post_unexplored),
+                ("post_video", self.post_video),
                 ("not_interested", self.not_interested),
                 ("block_author", self.block_author),
                 ("mute_author", self.mute_author),

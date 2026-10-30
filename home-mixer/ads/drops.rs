@@ -15,8 +15,8 @@ impl AdDrops {
             .extend(drops);
     }
 
-    pub fn take(&self) -> Vec<DroppedAd> {
-        std::mem::take(&mut *self.0.lock().unwrap_or_else(PoisonError::into_inner))
+    pub fn read<R>(&self, f: impl FnOnce(&[DroppedAd]) -> R) -> R {
+        f(&self.0.lock().unwrap_or_else(PoisonError::into_inner))
     }
 }
 
@@ -43,6 +43,7 @@ pub(crate) fn dropped_ad(ad: &AdIndexInfo, reason: AdDropReason) -> DroppedAd {
         ad_info: Some(AdIndexInfo {
             line_item_id: ad.line_item_id,
             campaign_id: ad.campaign_id,
+            funnel_traced: ad.funnel_traced,
             ..logged_ad_info(ad)
         }),
         ..Default::default()

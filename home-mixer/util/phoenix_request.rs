@@ -3,6 +3,9 @@ use crate::models::query::ScoredPostsQuery;
 use crate::params::{PhoenixExperimentOverrides, RerankerHeadTag};
 use crate::util::post_engagers::set_post_engagers;
 use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, RwLock};
+use tracing::warn;
 use xai_candidate_pipeline::component_library::clients::phoenix_prediction_client::TOP_LOG_PROBS_NUM;
 use xai_candidate_pipeline::component_library::clients::phoenix_retrieval_client::PhoenixRetrievalCluster;
 use xai_geo_ip::zip_to_dma_code;
@@ -12,8 +15,16 @@ use xai_recsys_proto::{
     PredictNextActionsRequest, ProductSurface, RetrieveTopKCandidatesResponse, TweetInfo,
     UserContext,
 };
+use xai_stats_receiver::global_stats_receiver;
 
 const PHOENIX_CLIENT_MAX_CANDIDATES: usize = 2800;
+const RETRIEVAL_VALUE_MODEL_WEIGHTS_METRIC: &str = "PhoenixRetrieval.ValueModelWeights";
+const MAX_CACHED_VALUE_MODEL_WEIGHTS: usize = 64;
+
+type ParsedValueModelWeights = Option<Arc<HashMap<String, f32>>>;
+
+static VALUE_MODEL_WEIGHTS: LazyLock<RwLock<HashMap<String, ParsedValueModelWeights>>> =
+    LazyLock::new(Default::default);
 
 pub fn candidates_from_retrieval_response(
     response: RetrieveTopKCandidatesResponse,
@@ -132,6 +143,7 @@ pub fn build_user_context(query: &ScoredPostsQuery) -> Option<UserContext> {
                 .and_then(|l| l.zip_code.as_deref()),
         ) as i32,
         user_installed_apps: query.user_installed_apps.clone().unwrap_or_default(),
+        recent_search_queries: query.recent_search_queries.clone(),
         ..Default::default()
     })
 }
@@ -214,6 +226,63 @@ pub fn parse_experiment_overrides(spec: &str) -> std::collections::HashMap<Strin
             let (k, v) = kv.split_once('=')?;
             let (k, v) = (k.trim(), v.trim());
             (!k.is_empty()).then(|| (k.to_string(), v.to_string()))
+        })
+        .collect()
+}
+
+pub fn retrieval_value_model_weights(spec: &str) -> HashMap<String, f32> {
+    if spec.is_empty() {
+        return HashMap::new();
+    }
+    let parsed = cached_value_model_weights(spec);
+    if let Some(receiver) = global_stats_receiver() {
+        let result = if parsed.is_some() { "sent" } else { "invalid" };
+        receiver.incr(
+            RETRIEVAL_VALUE_MODEL_WEIGHTS_METRIC,
+            &[("result", result)],
+            1,
+        );
+    }
+    parsed
+        .map(|weights| weights.as_ref().clone())
+        .unwrap_or_default()
+}
+
+fn cached_value_model_weights(spec: &str) -> ParsedValueModelWeights {
+    if let Some(parsed) = VALUE_MODEL_WEIGHTS
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(spec)
+    {
+        return parsed.clone();
+    }
+    let parsed = parse_value_model_weights(spec)
+        .inspect_err(|e| {
+            warn!("rust_home_mixer_retrieval_value_model_weights {spec:?} is not sent: {e}")
+        })
+        .ok()
+        .map(Arc::new);
+    let mut cache = VALUE_MODEL_WEIGHTS
+        .write()
+        .unwrap_or_else(|e| e.into_inner());
+    if cache.len() >= MAX_CACHED_VALUE_MODEL_WEIGHTS {
+        cache.clear();
+    }
+    cache.insert(spec.to_string(), parsed.clone());
+    parsed
+}
+
+pub fn parse_value_model_weights(spec: &str) -> Result<HashMap<String, f32>, String> {
+    let weights: HashMap<String, f64> = serde_json::from_str(spec).map_err(|e| e.to_string())?;
+    weights
+        .into_iter()
+        .map(|(name, weight)| {
+            let weight = weight as f32;
+            if weight.is_finite() {
+                Ok((name, weight))
+            } else {
+                Err(format!("weight of {name:?} is not a finite f32"))
+            }
         })
         .collect()
 }

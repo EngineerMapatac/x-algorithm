@@ -5,7 +5,7 @@ use prost::Message;
 use std::sync::Arc;
 use tonic::async_trait;
 use xai_ads_injection_proto::ads_injected_timeline::{
-    AdsInjectedTimeline, Counts, SubscriptionLevel, TimelineEntry,
+    AdsInjectedTimeline, Counts, DroppedAd, SubscriptionLevel, TimelineEntry,
 };
 use xai_candidate_pipeline::component_library::clients::kafka_publisher_client::{
     KafkaCluster, KafkaPublisherClient, ProdKafkaPublisherClient, ADS_INJECTION_TOPIC,
@@ -107,7 +107,7 @@ impl SideEffect<ScoredPostsQuery, FeedItem> for AdsInjectionLoggingSideEffect {
                 RequestType::Following => "following".to_string(),
                 _ => query.params.get(AdsBlenderType),
             },
-            dropped_ads: query.ad_drops.take(),
+            dropped_ads: query.ad_drops.read(<[DroppedAd]>::to_vec),
         };
 
         let bytes = timeline.encode_to_vec();

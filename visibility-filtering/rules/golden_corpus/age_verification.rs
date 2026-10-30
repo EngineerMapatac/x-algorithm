@@ -1,22 +1,45 @@
-use super::builders::{labeled, nsfw_high_precision_media, on_client, per_client_class};
 use super::interstitial::AT_CUTOFF;
-use super::{Role, Row};
+use super::{Role, Row, Subject};
 use crate::hydration::{Hydrator, Hydrators};
 use crate::models::VerifyBlurSupport::{
     AndroidNeedsUpdate, IosNeedsUpdate, Supported, Unsupported,
 };
 use crate::models::{
-    AuthorFeatures, ClientCapability, LimitedEngagementReason, NsfwFeature, NsfwViewerDropReason,
-    PostCandidate, SafetyLabelType, TombstoneReason, TweetFeatures, VerifyBlurSupport, Viewer,
-    ViewerFeatures, ViewerProfile,
+    AuthorFeatures, ClientCapability, ClientSwitch, LimitedEngagementReason, NsfwFeature,
+    NsfwViewerDropReason, PostCandidate, SafetyLabelType, TombstoneReason, TweetFeatures, Verdict,
+    VerifyBlurSupport, Viewer, ViewerFeatures, ViewerProfile,
 };
 use crate::rules::fixtures::{
-    allow, author_viewer, blurred, blurred_and_limited, candidate, legacy_interstitial, limited,
-    nsfw_viewer_dropped, sensitive_opt_in_viewer, tombstoned, verify_blurred, viewer,
-    viewer_with_profile, AUTHOR_ID, VIEWER_ID,
+    allow, author_viewer, blurred, blurred_and_limited, candidate, labeled, legacy_interstitial,
+    limited, nsfw_high_precision_media, nsfw_viewer_dropped, on_client, sensitive_opt_in_viewer,
+    tombstoned, verify_blurred, viewer, viewer_in_country, viewer_with_profile, AUTHOR_ID,
+    CLIENT_CLASSES, VIEWER_ID,
 };
-use crate::rules::SafetyLevel::{TimelineHome, TimelineHomeHydration};
+use crate::rules::SafetyLevel::{self, TimelineHome, TimelineHomeHydration};
 use xai_x_thrift::action::InterstitialReason;
+
+fn per_client_class(
+    verdict: impl Fn(VerifyBlurSupport) -> Verdict,
+) -> Vec<(SafetyLevel, Role, Verdict)> {
+    CLIENT_CLASSES
+        .into_iter()
+        .map(|class| {
+            let support = class
+                .capability
+                .verify_blur_support
+                .expect("every client class resolves a Verify blur support");
+            let viewer = ViewerFeatures {
+                client_capability: class.capability,
+                ..viewer_in_country("fr")
+            };
+            (
+                TimelineHomeHydration,
+                Role::As(class.name, viewer),
+                verdict(support),
+            )
+        })
+        .collect()
+}
 
 fn web_in_fr() -> Role {
     Role::As("web_in_fr", on_client("web", "fr", viewer(VIEWER_ID)))
@@ -62,6 +85,13 @@ fn sensitive_opt_in_web_in_fr() -> Role {
                 ..ViewerProfile::default()
             }),
         ),
+    )
+}
+
+fn sensitive_opt_in_web_in_us() -> Role {
+    Role::As(
+        "sensitive_opt_in_web_in_us",
+        on_client("web", "us", sensitive_opt_in_viewer()),
     )
 }
 
@@ -116,12 +146,12 @@ pub(super) fn rows() -> Vec<Row> {
     vec![
         Row {
             name: "nsfw_high_precision_media_per_client_class",
-            post: nsfw_high_precision_media(),
+            subject: Subject::Post(nsfw_high_precision_media()),
             expect: per_client_class(high_precision_tombstone),
         },
         Row {
             name: "nsfw_high_precision_media_for_an_ios_outdated_viewer",
-            post: nsfw_high_precision_media(),
+            subject: Subject::Post(nsfw_high_precision_media()),
             expect: vec![
                 (
                     TimelineHomeHydration,
@@ -193,7 +223,7 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "nsfw_admin_flag_media_per_client_class",
-            post: nsfw_admin_flag_media(),
+            subject: Subject::Post(nsfw_admin_flag_media()),
             expect: per_client_class(|support| match support {
                 Unsupported => tombstoned(
                     TombstoneReason::SensitiveViewerAgeVerification,
@@ -214,30 +244,8 @@ pub(super) fn rows() -> Vec<Row> {
             }),
         },
         Row {
-            name: "nsfw_reported_heuristics_label_per_client_class",
-            post: labeled(SafetyLabelType::NSFW_REPORTED_HEURISTICS),
-            expect: per_client_class(|support| match support {
-                Unsupported => tombstoned(
-                    TombstoneReason::SensitiveViewerAgeVerification,
-                    "nsfw_reported_heuristics/tombstone/age_verification",
-                ),
-                IosNeedsUpdate => tombstoned(
-                    TombstoneReason::UpdateAppIos,
-                    "nsfw_reported_heuristics/tombstone/update_app_ios",
-                ),
-                AndroidNeedsUpdate => tombstoned(
-                    TombstoneReason::UpdateAppAndroid,
-                    "nsfw_reported_heuristics/tombstone/update_app_android",
-                ),
-                Supported => verify_blurred(
-                    InterstitialReason::Sensitive(true),
-                    "nsfw_reported_heuristics/blur/sensitive/age_prompt",
-                ),
-            }),
-        },
-        Row {
             name: "nsfw_card_image_label_per_client_class",
-            post: labeled(SafetyLabelType::NSFW_CARD_IMAGE),
+            subject: Subject::Post(labeled(SafetyLabelType::NSFW_CARD_IMAGE)),
             expect: per_client_class(|support| match support {
                 Unsupported => tombstoned(
                     TombstoneReason::SensitiveViewerAgeVerification,
@@ -259,7 +267,7 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "gore_and_violence_label_per_client_class",
-            post: labeled(SafetyLabelType::GORE_AND_VIOLENCE_HIGH_PRECISION),
+            subject: Subject::Post(labeled(SafetyLabelType::GORE_AND_VIOLENCE_HIGH_PRECISION)),
             expect: per_client_class(|support| match support {
                 Unsupported => {
                     legacy_interstitial("gore_and_violence_high_precision/legacy_interstitial")
@@ -280,7 +288,7 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "nsfw_high_precision_media_for_a_web_viewer",
-            post: nsfw_high_precision_media(),
+            subject: Subject::Post(nsfw_high_precision_media()),
             expect: vec![
                 (TimelineHomeHydration, web_in_fr(), verify_high_precision()),
                 (
@@ -348,12 +356,12 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "nsfw_high_precision_media_with_a_failed_viewer_lookup",
-            post: {
+            subject: Subject::Post({
                 let mut candidate = nsfw_high_precision_media();
                 candidate.failed =
                     Hydrators::of(Hydrator::ViewerProfile).with(Hydrator::ViewerLabels);
                 candidate
-            },
+            }),
             expect: vec![
                 (TimelineHomeHydration, web_in_fr(), verify_high_precision()),
                 (
@@ -369,11 +377,13 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "nsfw_high_precision_media_from_a_blocking_author",
-            post: candidate()
-                .with_label(SafetyLabelType::NSFW_HIGH_PRECISION)
-                .with_media()
-                .with_edge(Hydrator::BlockedByAuthor)
-                .build(),
+            subject: Subject::Post(
+                candidate()
+                    .with_label(SafetyLabelType::NSFW_HIGH_PRECISION)
+                    .with_media()
+                    .with_edge(Hydrator::BlockedByAuthor)
+                    .build(),
+            ),
             expect: vec![(
                 TimelineHomeHydration,
                 web_in_fr(),
@@ -388,11 +398,13 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "nsfw_high_precision_adult_media",
-            post: candidate()
-                .tweet_id(AT_CUTOFF + (1 << 22))
-                .with_label(SafetyLabelType::NSFW_HIGH_PRECISION)
-                .with_media()
-                .build(),
+            subject: Subject::Post(
+                candidate()
+                    .tweet_id(AT_CUTOFF + (1 << 22))
+                    .with_label(SafetyLabelType::NSFW_HIGH_PRECISION)
+                    .with_media()
+                    .build(),
+            ),
             expect: vec![
                 (
                     TimelineHomeHydration,
@@ -412,6 +424,15 @@ pub(super) fn rows() -> Vec<Row> {
                 ),
                 (
                     TimelineHomeHydration,
+                    Role::InnerQuoted(Box::new(web_in_us())),
+                    blurred(
+                        InterstitialReason::Nudity(true),
+                        "nsfw_high_precision/blur/nudity",
+                    ),
+                ),
+                (TimelineHomeHydration, sensitive_opt_in_web_in_us(), allow()),
+                (
+                    TimelineHomeHydration,
                     author_web_in_fr(),
                     blurred(
                         InterstitialReason::Nudity(true),
@@ -421,60 +442,8 @@ pub(super) fn rows() -> Vec<Row> {
             ],
         },
         Row {
-            name: "nsfw_reported_heuristics_label",
-            post: labeled(SafetyLabelType::NSFW_REPORTED_HEURISTICS),
-            expect: vec![
-                (
-                    TimelineHomeHydration,
-                    web_in_fr(),
-                    verify_blurred(
-                        InterstitialReason::Sensitive(true),
-                        "nsfw_reported_heuristics/blur/sensitive/age_prompt",
-                    ),
-                ),
-                (
-                    TimelineHomeHydration,
-                    web_in_us(),
-                    blurred(
-                        InterstitialReason::Sensitive(true),
-                        "nsfw_reported_heuristics/blur/sensitive",
-                    ),
-                ),
-                (
-                    TimelineHomeHydration,
-                    author_web_in_fr(),
-                    blurred(
-                        InterstitialReason::Sensitive(true),
-                        "nsfw_reported_heuristics/blur/sensitive",
-                    ),
-                ),
-            ],
-        },
-        Row {
-            name: "gore_and_violence_reported_heuristics_label_for_a_web_viewer",
-            post: labeled(SafetyLabelType::GORE_AND_VIOLENCE_REPORTED_HEURISTICS),
-            expect: vec![
-                (
-                    TimelineHomeHydration,
-                    web_in_us(),
-                    blurred(
-                        InterstitialReason::Sensitive(true),
-                        "gore_and_violence_reported_heuristics/blur/sensitive",
-                    ),
-                ),
-                (
-                    TimelineHomeHydration,
-                    author_web_in_us(),
-                    blurred(
-                        InterstitialReason::Sensitive(true),
-                        "gore_and_violence_reported_heuristics/blur/sensitive",
-                    ),
-                ),
-            ],
-        },
-        Row {
             name: "nsfw_card_image_label_for_a_web_viewer",
-            post: labeled(SafetyLabelType::NSFW_CARD_IMAGE),
+            subject: Subject::Post(labeled(SafetyLabelType::NSFW_CARD_IMAGE)),
             expect: vec![
                 (
                     TimelineHomeHydration,
@@ -492,6 +461,7 @@ pub(super) fn rows() -> Vec<Row> {
                         "nsfw_card_image/blur/sensitive",
                     ),
                 ),
+                (TimelineHomeHydration, sensitive_opt_in_web_in_us(), allow()),
                 (
                     TimelineHomeHydration,
                     author_web_in_fr(),
@@ -504,7 +474,7 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "nsfw_admin_flag_media_for_a_web_viewer",
-            post: nsfw_admin_flag_media(),
+            subject: Subject::Post(nsfw_admin_flag_media()),
             expect: vec![
                 (
                     TimelineHomeHydration,
@@ -522,6 +492,7 @@ pub(super) fn rows() -> Vec<Row> {
                         "nsfw_admin/blur/sensitive",
                     ),
                 ),
+                (TimelineHomeHydration, sensitive_opt_in_web_in_us(), allow()),
                 (
                     TimelineHomeHydration,
                     author_web_in_fr(),
@@ -534,14 +505,16 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "unflagged_media_from_an_nsfw_admin_and_user_author",
-            post: candidate()
-                .with_author_features(AuthorFeatures {
-                    is_nsfw_admin: true,
-                    is_nsfw_user: true,
-                    ..Default::default()
-                })
-                .with_media()
-                .build(),
+            subject: Subject::Post(
+                candidate()
+                    .with_author_features(AuthorFeatures {
+                        is_nsfw_admin: true,
+                        is_nsfw_user: true,
+                        ..Default::default()
+                    })
+                    .with_media()
+                    .build(),
+            ),
             expect: per_client_class(|_| allow())
                 .into_iter()
                 .chain([
@@ -572,13 +545,15 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "nsfw_user_flag_media_for_a_web_viewer",
-            post: candidate()
-                .with_tweet_features(nsfw_flag(NsfwFeature {
-                    admin: false,
-                    user: true,
-                }))
-                .with_media()
-                .build(),
+            subject: Subject::Post(
+                candidate()
+                    .with_tweet_features(nsfw_flag(NsfwFeature {
+                        admin: false,
+                        user: true,
+                    }))
+                    .with_media()
+                    .build(),
+            ),
             expect: vec![
                 (
                     TimelineHomeHydration,
@@ -608,14 +583,16 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "nsfw_admin_flag_gore_media_for_a_web_viewer",
-            post: candidate()
-                .with_tweet_features(nsfw_flag(NsfwFeature {
-                    admin: true,
-                    user: false,
-                }))
-                .with_label(SafetyLabelType::GORE_AND_VIOLENCE_HIGH_PRECISION)
-                .with_media()
-                .build(),
+            subject: Subject::Post(
+                candidate()
+                    .with_tweet_features(nsfw_flag(NsfwFeature {
+                        admin: true,
+                        user: false,
+                    }))
+                    .with_label(SafetyLabelType::GORE_AND_VIOLENCE_HIGH_PRECISION)
+                    .with_media()
+                    .build(),
+            ),
             expect: vec![
                 (
                     TimelineHomeHydration,
@@ -637,7 +614,7 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "gore_and_violence_label_for_a_web_viewer",
-            post: labeled(SafetyLabelType::GORE_AND_VIOLENCE_HIGH_PRECISION),
+            subject: Subject::Post(labeled(SafetyLabelType::GORE_AND_VIOLENCE_HIGH_PRECISION)),
             expect: vec![
                 (
                     TimelineHomeHydration,
@@ -657,10 +634,7 @@ pub(super) fn rows() -> Vec<Row> {
                 ),
                 (
                     TimelineHomeHydration,
-                    Role::As(
-                        "sensitive_opt_in_web_in_us",
-                        on_client("web", "us", sensitive_opt_in_viewer()),
-                    ),
+                    sensitive_opt_in_web_in_us(),
                     blurred(
                         InterstitialReason::Violence(true),
                         "gore_and_violence_ignoring_settings/blur",
@@ -687,12 +661,9 @@ pub(super) fn rows() -> Vec<Row> {
                             country_code: Some("fr".into()),
                             client_capability: ClientCapability {
                                 verify_blur_support: Some(Supported),
-                                modern_blur: true,
-                                stale_tweet_limits: true,
-                                community_viewer_removed_limits: true,
-                                gore_blur_ignores_settings: false,
-                                fosnr_rules: true,
-                                fosnr_fallback_drops: false,
+                                ..ClientCapability::DEFAULT
+                                    .with(ClientSwitch::ModernBlur)
+                                    .with(ClientSwitch::CommunityViewerRemovedLimits)
                             },
                             ..sensitive_opt_in_viewer()
                         },

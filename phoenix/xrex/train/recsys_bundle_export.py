@@ -1080,16 +1080,12 @@ def build_bundle(
     import flatbuffers
     from jax import export as jax_export
 
-    from xrex.models.recsys_gen_recs_model import RecsysGenRecsModelConfig
     from xrex.models.recsys_model import RecsysAggregatedModelConfig
     from xrex.models.recsys_two_tower_model import RecsysTwoTowerModelConfig
 
     model_config = trainer.model_config
     two_tower = isinstance(model_config, RecsysTwoTowerModelConfig)
-    if not two_tower and (
-        not isinstance(model_config, RecsysAggregatedModelConfig)
-        or isinstance(model_config, RecsysGenRecsModelConfig)
-    ):
+    if not two_tower and not isinstance(model_config, RecsysAggregatedModelConfig):
         raise NotImplementedError(
             "StableHLO bundle export supports ranking (RecsysAggregatedModelConfig) and "
             f"retrieval (RecsysTwoTowerModelConfig) only, got {type(model_config).__name__}"

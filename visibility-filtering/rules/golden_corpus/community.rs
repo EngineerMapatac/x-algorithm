@@ -1,12 +1,11 @@
-use super::builders::on_client;
-use super::{Role, Row};
+use super::{Role, Row, Subject};
 use crate::hydration::{Hydrator, Hydrators};
 use crate::models::{
-    ClientCapability, CommunityModeration, LimitedEngagementReason, PostCandidate, TweetFeatures,
+    ClientSwitch, CommunityModeration, LimitedEngagementReason, PostCandidate, TweetFeatures,
     Verdict, ViewerFeatures,
 };
 use crate::rules::fixtures::{
-    allow, author_viewer, candidate, dropped, limited, viewer, VIEWER_ID,
+    allow, author_viewer, candidate, dropped, limited, on_client, viewer, VIEWER_ID,
 };
 use crate::rules::SafetyLevel::TimelineHomeHydration;
 use std::num::NonZeroU64;
@@ -71,10 +70,9 @@ fn ios_before_viewer_removed_limits() -> Role {
     Role::As(
         "ios_10_15",
         ViewerFeatures {
-            client_capability: ClientCapability {
-                community_viewer_removed_limits: false,
-                ..ios.client_capability
-            },
+            client_capability: ios
+                .client_capability
+                .without(ClientSwitch::CommunityViewerRemovedLimits),
             ..ios
         },
     )
@@ -84,7 +82,7 @@ pub(super) fn rows() -> Vec<Row> {
     vec![
         Row {
             name: "hidden_community_post",
-            post: community_post(HIDDEN, Some(false)),
+            subject: Subject::Post(community_post(HIDDEN, Some(false))),
             expect: vec![
                 (TimelineHomeHydration, Role::NonFollower, hidden_drop()),
                 (TimelineHomeHydration, Role::Follower, hidden_drop()),
@@ -93,7 +91,7 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "hidden_community_post_moderator_lookup_failed",
-            post: community_post(HIDDEN, None),
+            subject: Subject::Post(community_post(HIDDEN, None)),
             expect: vec![
                 (TimelineHomeHydration, Role::NonFollower, allow()),
                 (TimelineHomeHydration, Role::LoggedOut, hidden_drop()),
@@ -101,7 +99,7 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "author_removed_community_post",
-            post: community_post(AUTHOR_REMOVED, Some(false)),
+            subject: Subject::Post(community_post(AUTHOR_REMOVED, Some(false))),
             expect: vec![
                 (
                     TimelineHomeHydration,
@@ -118,18 +116,18 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "hidden_author_removed_community_post",
-            post: community_post(
+            subject: Subject::Post(community_post(
                 CommunityModeration {
                     is_hidden: true,
                     is_author_removed: true,
                 },
                 Some(false),
-            ),
+            )),
             expect: vec![(TimelineHomeHydration, Role::NonFollower, hidden_drop())],
         },
         Row {
             name: "unmoderated_community_post",
-            post: community_post(CommunityModeration::default(), None),
+            subject: Subject::Post(community_post(CommunityModeration::default(), None)),
             expect: vec![
                 (TimelineHomeHydration, Role::NonFollower, allow()),
                 (TimelineHomeHydration, Role::LoggedOut, allow()),
@@ -137,7 +135,7 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "community_post_viewer_removed",
-            post: viewer_removed_post(true),
+            subject: Subject::Post(viewer_removed_post(true)),
             expect: vec![
                 (
                     TimelineHomeHydration,
@@ -174,7 +172,7 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "community_post_author_removed_from_its_community",
-            post: viewer_removed_post(true),
+            subject: Subject::Post(viewer_removed_post(true)),
             expect: vec![(
                 TimelineHomeHydration,
                 Role::As("author_on_web", on_client("web", "us", author_viewer())),
@@ -183,7 +181,7 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "community_post_viewer_not_removed",
-            post: viewer_removed_post(false),
+            subject: Subject::Post(viewer_removed_post(false)),
             expect: vec![
                 (
                     TimelineHomeHydration,
@@ -203,11 +201,11 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "community_post_viewer_removal_lookup_failed",
-            post: {
+            subject: Subject::Post({
                 let mut candidate = viewer_removed_post(false);
                 candidate.failed = Hydrators::of(Hydrator::CommunityViewerRemoved);
                 candidate
-            },
+            }),
             expect: vec![(
                 TimelineHomeHydration,
                 Role::As("web", on_client("web", "us", viewer(VIEWER_ID))),

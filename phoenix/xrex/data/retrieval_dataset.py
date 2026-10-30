@@ -279,6 +279,7 @@ class RetrievalDataset(Enum):
     )
     HOME_COLD = (13, *_sid_window("1fav_1day.parquet"))
     HOME_HOT = (14, *_sid_window("1fav_1day.parquet"))
+    IMMERSIVE32FavVideo14To30Day = (19, *_sid_window("32fav_video_14to30day.parquet"))
 
     def __new__(cls, value: int, path: str | None = None, backup_path: str | None = None):
         obj = object.__new__(cls)
@@ -443,15 +444,27 @@ class RetrievalDataset(Enum):
                 )
             return None if home_source is False else home_source
 
+        home_cold_keep: list[np.ndarray | None] = []
+
+        def _home_cold_keep(pids: np.ndarray) -> np.ndarray | None:
+            if not home_cold_keep:
+                meta_path = cold_pool_metadata_path or default_cold_pool_metadata_path()
+                mask = cold_pool_mask(pids, meta_path)
+                home_cold_keep.append(
+                    None
+                    if mask is None
+                    else mask & fresh_post_mask(pids, cold_start_max_age_seconds)
+                )
+            return home_cold_keep[0]
+
         for ds in datasets:
             if ds in cls.home_slices():
                 result = _load_home_source()
                 if result is None:
                     continue
                 pids, aids, sids = result
-                meta_path = cold_pool_metadata_path or default_cold_pool_metadata_path()
-                mask = cold_pool_mask(pids, meta_path)
-                if mask is None:
+                cold_keep = _home_cold_keep(pids)
+                if cold_keep is None:
                     keep = (
                         np.ones(len(pids), dtype=bool)
                         if ds is cls.HOME_HOT
@@ -463,7 +476,6 @@ class RetrievalDataset(Enum):
                         "keeping all HOME rows" if ds is cls.HOME_HOT else "emitting 0 rows",
                     )
                 else:
-                    cold_keep = mask & fresh_post_mask(pids, cold_start_max_age_seconds)
                     keep = cold_keep if ds is cls.HOME_COLD else ~cold_keep
                 n_keep = int(np.count_nonzero(keep))
                 logger.info(

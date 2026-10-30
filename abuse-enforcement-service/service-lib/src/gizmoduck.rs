@@ -3,8 +3,10 @@ use std::time::Instant;
 
 use anyhow::{anyhow, Context, Result};
 use tracing::info;
-use xai_core_entities::entities::VerifiedType;
-use xai_core_entities::gizmoduck_client::{GizmoduckClient, ProdGizmoduckClient, QueryFields};
+use xai_core_entities::entities::{GizmoduckUserType, VerifiedType};
+use xai_core_entities::gizmoduck_client::{
+    GizmoduckClient, LookupContext, ProdGizmoduckClient, QueryFields,
+};
 use xai_core_entities::rpc_constants::{GizmoduckRpcConstants, RpcConstants};
 use xai_strato::{StratoGrpc, StratoGrpcConfig};
 
@@ -68,12 +70,20 @@ impl GizmoduckCoreClient {
         })
     }
 
-    #[tracing::instrument(skip(self), fields(present, suspended, deactivated, label_count))]
+    #[tracing::instrument(
+        skip(self),
+        fields(present, suspended, deactivated, label_count, user_type)
+    )]
     pub async fn fetch_user(&self, user_id: i64) -> Result<GizmoduckFacts> {
         let start = Instant::now();
+        let context = LookupContext {
+            for_user_id: Some(user_id),
+            include_soft_users: true,
+            ..Default::default()
+        };
         let mut results = self
             .inner
-            .get_users_with_context(vec![user_id], None, QUERY_FIELDS)
+            .get_users_with_context(vec![user_id], Some(context), QUERY_FIELDS)
             .await;
         let item = results
             .remove(&user_id)
@@ -103,6 +113,7 @@ impl GizmoduckCoreClient {
                             .as_ref()
                             .map(|d| d.is_verified_organization_affiliate)
                             .unwrap_or(false),
+                        user_type: user.user_type.map(user_type_name),
                     }
                 }
             },
@@ -131,6 +142,7 @@ impl GizmoduckCoreClient {
         span.record("suspended", facts.suspended);
         span.record("deactivated", facts.deactivated);
         span.record("label_count", facts.labels.len());
+        span.record("user_type", tracing::field::debug(&facts.user_type));
 
         let state_label = if facts.suspended {
             "suspended"
@@ -163,9 +175,141 @@ fn verified_type_name(v: VerifiedType) -> String {
     }
 }
 
+fn user_type_name(t: GizmoduckUserType) -> String {
+    match t {
+        GizmoduckUserType::Normal => "Normal".to_owned(),
+        GizmoduckUserType::Frictionless => "Frictionless".to_owned(),
+        GizmoduckUserType::Email => "Email".to_owned(),
+        GizmoduckUserType::Soft => "Soft".to_owned(),
+        GizmoduckUserType::NoScreenName => "NoScreenName".to_owned(),
+        GizmoduckUserType::Periscope => "Periscope".to_owned(),
+        GizmoduckUserType::LoggedOut => "LoggedOut".to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use xai_core_entities::entities::{
+        GizmoduckUser, GizmoduckUserResult, GizmoduckUserType, PCFLabel, Safety,
+    };
+    use xai_core_entities::gizmoduck_client::{
+        GizmoduckClient, LookupContext, QueryFields, UserFields, ViewerData,
+    };
+
+    use super::GizmoduckCoreClient;
     use crate::gizmoduck_labels::label_ordinal_to_name;
+
+    const SOFT_USER: i64 = 1001;
+
+    #[derive(Default)]
+    struct SoftUserGizmoduck {
+        contexts: Mutex<Vec<Option<LookupContext>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl GizmoduckClient for SoftUserGizmoduck {
+        async fn get_users_with_context(
+            &self,
+            user_ids: Vec<i64>,
+            context: Option<LookupContext>,
+            _query_fields: &[QueryFields],
+        ) -> HashMap<i64, anyhow::Result<Option<GizmoduckUserResult>>> {
+            let include_soft_users = context.as_ref().is_some_and(|c| c.include_soft_users);
+            self.contexts.lock().unwrap().push(context);
+            user_ids
+                .into_iter()
+                .map(|id| {
+                    let user = (id == SOFT_USER && include_soft_users).then(|| GizmoduckUser {
+                        user_id: id as u64,
+                        user_type: Some(GizmoduckUserType::Soft),
+                        safety: Safety {
+                            suspended: true,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    });
+                    let result = GizmoduckUserResult {
+                        user,
+                        response_state: None,
+                    };
+                    (id, Ok(Some(result)))
+                })
+                .collect()
+        }
+        async fn get_users(
+            &self,
+            _user_ids: Vec<i64>,
+        ) -> HashMap<i64, anyhow::Result<Option<GizmoduckUserResult>>> {
+            unimplemented!()
+        }
+        async fn get_users_with_perspective(
+            &self,
+            _viewer_id: i64,
+            _user_ids: Vec<i64>,
+        ) -> HashMap<i64, anyhow::Result<Option<GizmoduckUserResult>>> {
+            unimplemented!()
+        }
+        async fn get_viewer_roles(&self, _user_id: u64) -> anyhow::Result<Vec<String>> {
+            unimplemented!()
+        }
+        async fn get_viewer_data(&self, _user_id: u64) -> anyhow::Result<ViewerData> {
+            unimplemented!()
+        }
+        async fn get_viewer_data_with_fields(
+            &self,
+            _user_id: u64,
+            _query_fields: &[QueryFields],
+        ) -> anyhow::Result<ViewerData> {
+            unimplemented!()
+        }
+        async fn get_pcf_labels(
+            &self,
+            _user_ids: Vec<i64>,
+        ) -> HashMap<i64, anyhow::Result<PCFLabel>> {
+            unimplemented!()
+        }
+        async fn get_profile_description_languages(
+            &self,
+            _user_ids: Vec<i64>,
+        ) -> HashMap<i64, anyhow::Result<Option<String>>> {
+            unimplemented!()
+        }
+        async fn get_user_fields(
+            &self,
+            _user_ids: Vec<i64>,
+        ) -> HashMap<i64, anyhow::Result<UserFields>> {
+            unimplemented!()
+        }
+        async fn get_by_screen_name(
+            &self,
+            _screen_name: &str,
+        ) -> anyhow::Result<Option<GizmoduckUserResult>> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_user_includes_soft_users() {
+        let gizmoduck = Arc::new(SoftUserGizmoduck::default());
+        let client = GizmoduckCoreClient::from_client(gizmoduck.clone());
+
+        let facts = client.fetch_user(SOFT_USER).await.unwrap();
+
+        assert!(facts.present);
+        assert!(facts.suspended);
+        assert_eq!(facts.user_type.as_deref(), Some("Soft"));
+        assert_eq!(
+            gizmoduck.contexts.lock().unwrap().as_slice(),
+            [Some(LookupContext {
+                for_user_id: Some(SOFT_USER),
+                include_soft_users: true,
+                ..Default::default()
+            })],
+        );
+    }
 
     #[test]
     fn spam_high_recall_maps_to_pascal_case() {

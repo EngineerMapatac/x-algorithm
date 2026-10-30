@@ -2,7 +2,6 @@
 pub enum Decision {
     Skip(String),
     Act(Vec<ActionSpec>),
-    ActRequestedActions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,7 +26,10 @@ pub enum ActionSpec {
 impl ActionSpec {
     pub fn dedup_action_class(&self) -> u8 {
         match self {
-            ActionSpec::SuspendUser { .. } => crate::dedup_cache::CLASS_SUSPEND,
+            ActionSpec::SuspendUser { perm: true, .. } => {
+                crate::dedup_cache::CLASS_SUSPEND_PERMANENT
+            }
+            ActionSpec::SuspendUser { perm: false, .. } => crate::dedup_cache::CLASS_SUSPEND,
             ActionSpec::Arkose | ActionSpec::Captcha | ActionSpec::SpamLivenessCheck => {
                 crate::dedup_cache::CLASS_CHALLENGE
             }

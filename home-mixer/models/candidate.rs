@@ -32,6 +32,12 @@ pub struct PostCandidate {
     pub served_slate_context: Option<SlateContext>,
     #[serde(default)]
     pub reranker_head_tag: Option<u32>,
+    #[serde(default)]
+    pub page_decode_slot: Option<u32>,
+    #[serde(default)]
+    pub page_decode_prob: Option<f64>,
+    #[serde(default)]
+    pub page_rl_exploration_prob: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backbone_scores: Option<PhoenixScores>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -61,6 +67,10 @@ pub struct PostCandidate {
     pub has_video: Option<bool>,
     #[serde(default)]
     pub video_aspect_ratio: Option<f32>,
+    #[serde(default)]
+    pub video_media_id: Option<u64>,
+    #[serde(default)]
+    pub video_md5_hashes: Option<Vec<String>>,
     #[serde(default)]
     pub video_carousel_extra: bool,
     pub media_count: Option<i32>,
@@ -102,6 +112,8 @@ pub struct PostCandidate {
     pub nsfw_author: Option<bool>,
     pub nsfw_author_ads: Option<bool>,
     pub nsfw_author_phoenix: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub soft_nsfw: Option<bool>,
     #[serde(default)]
     pub safety_labels: Vec<SafetyLabelInfo>,
     #[serde(default)]
@@ -305,6 +317,7 @@ impl CandidateHelpers for PostCandidate {
             reranker_head_tag: self.reranker_head_tag,
             prediction_heads: Vec::new(),
             prediction_values: Vec::new(),
+            page_decoded: None,
         }
     }
 
@@ -434,6 +447,33 @@ mod tests {
         assert_eq!(candidate.slate_context, None);
         assert_eq!(candidate.has_video, None);
         assert_eq!(candidate.media_count, None);
+    }
+
+    #[test]
+    fn post_candidate_deserializes_cache_entries_without_page_rl_fields() {
+        let mut value = serde_json::to_value(PostCandidate {
+            tweet_id: 9,
+            page_decode_slot: Some(1),
+            page_decode_prob: Some(0.5),
+            page_rl_exploration_prob: Some(0.25),
+            ..Default::default()
+        })
+        .unwrap();
+        let obj = value.as_object_mut().unwrap();
+        for field in [
+            "page_decode_slot",
+            "page_decode_prob",
+            "page_rl_exploration_prob",
+        ] {
+            assert!(obj.remove(field).is_some(), "{field} must be serialized");
+        }
+
+        let candidate: PostCandidate = serde_json::from_value(value).unwrap();
+
+        assert_eq!(candidate.tweet_id, 9);
+        assert_eq!(candidate.page_decode_slot, None);
+        assert_eq!(candidate.page_decode_prob, None);
+        assert_eq!(candidate.page_rl_exploration_prob, None);
     }
 
     #[test]

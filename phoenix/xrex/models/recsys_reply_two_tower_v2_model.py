@@ -38,6 +38,7 @@ from xrex.data.recsys.reply_features import (
 from xrex.models.loss_recsys import multihot_loss_compute, tweedie_loss_compute
 from xrex.models.model_utils import get_parameter
 from xrex.models.normalization import RMSNorm
+from xrex.models.page_rl import PageDecodeInputs
 from xrex.models.recsys_embedding import (
     RecsysEmbeddings,
     RecsysEmbeddingsParameter,
@@ -974,7 +975,12 @@ class RecsysReplyTwoTowerV2Model(hk.Module):
         self,
         batch: RecsysFeaturesBatch,
         recsys_embeddings: RecsysEmbeddings,
+        page_decode: PageDecodeInputs | None = None,
+        run_decoder: bool = True,
     ) -> tuple[jax.Array, jax.Array]:
+        del run_decoder
+        if page_decode is not None:
+            raise ValueError("the reply ranker has no page decoder; turn serve_page_decoder off")
         logits, continuous, _ = self(batch, recsys_embeddings)
         return logits, continuous
 

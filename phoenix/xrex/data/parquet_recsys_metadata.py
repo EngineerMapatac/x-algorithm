@@ -223,10 +223,12 @@ def remaining_steps_from_manifest(
     end_batch_id: int,
     resume_batch_id: int | None = None,
     resume_reads_in_batch: int = 0,
+    shards_per_partition: int = 1,
 ) -> int:
     rows = manifest.rows_matrix(topic_dir, start_batch_id, end_batch_id, num_partitions)
-    full, tail = np.divmod(rows, batch_size)
-    steps = full + ((tail > 0) & (tail * 2 >= batch_size))
+    full, tail = np.divmod(rows, batch_size * shards_per_partition)
+    kept_tail = tail // shards_per_partition
+    steps = full + ((kept_tail > 0) & (kept_tail * 2 >= batch_size))
     shard_of = np.arange(num_partitions) % num_shards
     per_batch_shard = np.stack(
         [steps[:, shard_of == s].sum(axis=1) for s in range(num_shards)], axis=1
@@ -258,6 +260,10 @@ def _batch_timestamps(
             BATCH_MANIFEST_FILENAME,
         )
         return manifest.batch_timestamps(min_batch, max_batch)
+
+
+def batch_start_time_ms(topic_dir: str, batch_id: int) -> int:
+    return int(_batch_timestamps(topic_dir, batch_id, batch_id)[0])
 
 
 def resolve_time_range(

@@ -58,7 +58,7 @@ fn high_row() -> ActionControlRecord {
             None,
             None,
             ControlMode::Live,
-            vec![PageAction::Suspend {}],
+            vec![PageAction::SUSPEND],
         )
     }
 }
@@ -75,33 +75,32 @@ async fn bed(config: serde_json::Value, row: ActionControlRecord) -> TestBed {
 }
 
 #[tokio::test]
-async fn malformed_confidence_config_forces_live_level_rows_to_record_only() {
+async fn malformed_confidence_config_makes_no_evidence_current_and_the_row_still_acts() {
     let _serial = overturn_hold::tests::METRICS_LOCK.lock().await;
+    let want = bed(on_config(false, None), high_row())
+        .await
+        .run_fresh(&high())
+        .await;
+    assert_eq!(want.status, "success", "{want:?}");
     let mut config = on_config(false, None);
     config["action_control"]["confidence"] = serde_json::json!({
         "label_map": {LABEL: "high"}
     });
     let trace = bed(config, high_row()).await.run_fresh(&high()).await;
-    assert_eq!(trace.status, "dry_run", "{trace:?}");
-    assert!(trace.ais.is_empty(), "{trace:?}");
-    assert_eq!(trace.tickets, 0, "{trace:?}");
-    assert!(
-        trace
-            .dedup_calls
-            .iter()
-            .all(|call| call.starts_with("peek")),
-        "{trace:?}"
-    );
+    assert_eq!(trace.status, want.status, "{trace:?}");
+    assert_eq!(trace.ais.len(), want.ais.len(), "{trace:?}");
+    assert_eq!(trace.tickets, want.tickets, "{trace:?}");
     let info = &trace.outcomes[0].info;
-    assert_eq!(info["logged_because"], "weak_evidence");
-    assert_eq!(
-        info[action_control::FORCED_RECORDING_KEY],
-        "confidence_config_unreadable"
+    assert!(!info.contains_key("logged_because"), "{info:?}");
+    assert!(
+        !info.contains_key(action_control::FORCED_RECORDING_KEY),
+        "{info:?}"
     );
+    assert_eq!(info["confidence_evidence_supports"], "none");
 }
 
 #[tokio::test]
-async fn a_future_record_timestamp_cannot_extend_an_override_past_seven_days() {
+async fn a_record_written_in_the_future_with_an_override_is_unreadable() {
     let _serial = overturn_hold::tests::METRICS_LOCK.lock().await;
     let now = now_millis();
     let mut row = high_row();
@@ -125,7 +124,7 @@ async fn a_future_record_timestamp_cannot_extend_an_override_past_seven_days() {
 }
 
 #[tokio::test]
-async fn an_override_expiring_before_its_future_write_cannot_act() {
+async fn a_stored_override_expiring_before_its_write_leaves_the_record_unreadable() {
     let _serial = overturn_hold::tests::METRICS_LOCK.lock().await;
     let now = now_millis();
     let mut row = high_row();
@@ -148,7 +147,7 @@ async fn an_override_expiring_before_its_future_write_cannot_act() {
 }
 
 #[test]
-fn five_minute_and_seven_day_boundaries_are_exact() {
+fn the_five_minute_clock_skew_boundary_is_exact() {
     let now = 1_791_000_000_000;
     let mut ev = evidence(ConfidenceLevel::High);
     ev.read_at_ms = now + crate::confidence::CLOCK_SKEW_MS;
@@ -168,21 +167,5 @@ fn five_minute_and_seven_day_boundaries_are_exact() {
             crate::confidence::DEFAULT_EVIDENCE_MAX_AGE_DAYS * DAY_MS,
         ),
         None
-    );
-
-    let future_write = now + crate::confidence::CLOCK_SKEW_MS;
-    let mut ov = EvidenceOverride {
-        by: "operator@example.com".into(),
-        reason: "temporary exception".into(),
-        expires_at_ms: now + 7 * DAY_MS,
-    };
-    assert!(crate::confidence::override_active(&ov, future_write, now));
-    ov.expires_at_ms += 1;
-    assert!(!crate::confidence::override_active(&ov, future_write, now));
-
-    ov.expires_at_ms = now + 60_000;
-    assert!(
-        !crate::confidence::override_active(&ov, future_write, now),
-        "an override expiring before its stored write time must not act"
     );
 }

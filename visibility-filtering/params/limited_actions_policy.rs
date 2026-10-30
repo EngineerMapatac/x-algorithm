@@ -1,45 +1,15 @@
-use crate::models::LimitedEngagementReason;
+use crate::metrics::families::LIMITED_ACTIONS_POLICY_MISSING;
+use crate::metrics::Metrics;
+use crate::models::{LimitedActionType, LimitedEngagementReason};
 use crate::params::limited_actions_copy::{Prompt, PromptCopy};
 use xai_feature_switches::FeatureSwitchResults;
-use xai_stats_receiver::StatsReceiverExt;
+use xai_stringcenter::DEFAULT_LANGUAGE;
 
 pub(super) const REASON_FIELD: &str = "LimitedEngagementReason";
 const LIMITED_ACTIONS_KEY: &str = "limited_actions_policy_limited_actions";
 const COPY_NAMESPACE_KEY: &str = "limited_actions_policy_copy_namespace";
 const PROMPT_TYPE_KEY: &str = "limited_actions_policy_prompt_type";
 const LEARN_MORE_URL_KEY: &str = "limited_actions_policy_prompt_learn_more_url";
-const MISSING_POLICY_COUNTER: &str = "limited_actions_policy_missing";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::EnumString)]
-#[strum(serialize_all = "snake_case")]
-pub enum LimitedActionType {
-    Reply,
-    Retweet,
-    QuoteTweet,
-    Like,
-    React,
-    SendViaDm,
-    AddToBookmarks,
-    AddToMoment,
-    PinToProfile,
-    ViewTweetActivity,
-    ShareTweetVia,
-    Follow,
-    ListsAddRemove,
-    MuteConversation,
-    Embed,
-    ViewHiddenReplies,
-    HideCommunityTweet,
-    CopyLink,
-    VoteOnPoll,
-    RemoveFromCommunity,
-    ShowRetweetActionMenu,
-    ReplyDownVote,
-    Autoplay,
-    EditTweet,
-    Highlight,
-    ViewPostEngagements,
-}
 
 #[derive(Clone, Copy, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
@@ -57,6 +27,7 @@ pub(crate) struct LimitedAction {
 #[derive(Default)]
 pub(crate) struct LimitedActionsPolicies {
     policies: Vec<(LimitedEngagementReason, Vec<LimitedAction>)>,
+    language: Option<String>,
 }
 
 impl LimitedActionsPolicies {
@@ -64,15 +35,16 @@ impl LimitedActionsPolicies {
         reasons: impl IntoIterator<Item = LimitedEngagementReason>,
         match_reason: impl Fn(LimitedEngagementReason) -> FeatureSwitchResults,
         prompt: impl Fn(LimitedActionType, &PromptCopy) -> Option<Prompt>,
-        stats: Option<&dyn StatsReceiverExt>,
+        metrics: &Metrics,
     ) -> Self {
         let mut matched: Vec<LimitedEngagementReason> = Vec::new();
         let mut policies = Vec::new();
         let count = |reason: LimitedEngagementReason, missing: Missing| {
-            if let Some(stats) = stats {
-                let labels = [("reason", reason.into()), ("missing", missing.into())];
-                stats.incr(MISSING_POLICY_COUNTER, &labels, 1);
-            }
+            metrics.count(
+                &LIMITED_ACTIONS_POLICY_MISSING,
+                [reason.into(), missing.into()],
+                1,
+            );
         };
         for reason in reasons {
             if matched.contains(&reason) {
@@ -107,7 +79,19 @@ impl LimitedActionsPolicies {
             }
             policies.push((reason, actions));
         }
-        Self { policies }
+        Self {
+            policies,
+            language: None,
+        }
+    }
+
+    pub(super) fn in_language(mut self, language: Option<&str>) -> Self {
+        self.language = language.map(str::to_owned);
+        self
+    }
+
+    pub(crate) fn language(&self) -> &str {
+        self.language.as_deref().unwrap_or(DEFAULT_LANGUAGE)
     }
 
     pub(crate) fn actions(&self, reason: LimitedEngagementReason) -> &[LimitedAction] {
@@ -130,13 +114,13 @@ impl LimitedActionsPolicies {
                 .into_iter()
                 .map(|(reason, types)| (reason, types.into_iter().map(unprompted).collect()))
                 .collect(),
+            language: None,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::tests::Counted;
     use super::*;
     use crate::params::limited_actions_copy::LimitedActionsCopy;
     use crate::params::ClientSwitches;
@@ -147,7 +131,7 @@ mod tests {
     use LimitedEngagementReason::{
         BlockedViewer, CommunityTweetCommunityDeleted, CommunityTweetCommunityNotFound,
         CommunityTweetCommunitySuspended, CommunityTweetHidden, CommunityTweetMemberRemoved,
-        CommunityTweetViewerRemoved, ConversationControl, LocalTweet, ReadonlyViewer,
+        CommunityTweetViewerRemoved, ConversationControl, LocalTweet, NonCompliant, ReadonlyViewer,
         RootAuthorBlockedViewer, StaleTweet,
     };
 
@@ -203,6 +187,23 @@ mod tests {
             .filter(|action| *action != T::RemoveFromCommunity)
             .collect();
         let expected = [
+            (
+                NonCompliant,
+                Some("NonCompliant"),
+                vec![
+                    T::Reply,
+                    T::Retweet,
+                    T::Like,
+                    T::React,
+                    T::SendViaDm,
+                    T::AddToBookmarks,
+                    T::AddToMoment,
+                    T::PinToProfile,
+                    T::ViewTweetActivity,
+                    T::ShareTweetVia,
+                    T::CopyLink,
+                ],
+            ),
             (ConversationControl, Some("LimitedReplies"), vec![T::Reply]),
             (
                 BlockedViewer,
@@ -312,14 +313,13 @@ mod tests {
                 .iter()
                 .filter_map(|(_, namespace, actions)| Some(((*namespace)?, actions.as_slice()))),
         );
-        let stats = Counted::default();
-        let policies = ClientSwitches::for_tests().limited_actions_policies(
+        let (metrics, recording) = Metrics::recording();
+        let policies = ClientSwitches::for_tests_with(copy).limited_actions_policies(
             None,
             None,
             None,
             expected.iter().map(|(reason, _, _)| *reason),
-            &copy,
-            Some(&stats),
+            &metrics,
         );
         for (reason, namespace, actions) in expected {
             let resolved = policies.actions(reason);
@@ -338,7 +338,7 @@ mod tests {
                 );
             }
         }
-        let counted = stats.take();
+        let counted = recording.take(&LIMITED_ACTIONS_POLICY_MISSING.family);
         assert!(counted.is_empty(), "{counted:?}");
     }
 
@@ -356,17 +356,19 @@ limited_actions_policy:
     values:
       limited_actions_policy_limited_actions: ["no_such_action"]
 "#;
-        let switches = ClientSwitches::new(Arc::new(ArcSwap::from_pointee(
-            FeatureSwitches::load_string(POLICY).unwrap(),
-        )));
-        let stats = Counted::default();
+        let switches = ClientSwitches::new(
+            Arc::new(ArcSwap::from_pointee(
+                FeatureSwitches::load_string(POLICY).unwrap(),
+            )),
+            LimitedActionsCopy::from_json("[]"),
+        );
+        let (metrics, recording) = Metrics::recording();
         let policies = switches.limited_actions_policies(
             None,
             None,
             None,
             [StaleTweet, ConversationControl, BlockedViewer, StaleTweet],
-            &LimitedActionsCopy::from_json("[]"),
-            Some(&stats),
+            &metrics,
         );
         assert_eq!(
             policies.actions(ConversationControl),
@@ -378,14 +380,15 @@ limited_actions_policy:
         assert!(policies.actions(StaleTweet).is_empty());
         assert!(policies.actions(BlockedViewer).is_empty());
         let missing = |reason: &str, missing: &str| {
-            (
-                MISSING_POLICY_COUNTER.to_string(),
-                format!("reason={reason},missing={missing}"),
-                1,
-            )
+            format!("limited_actions_policy_missing{{reason={reason},missing={missing}}} 1")
         };
+        let counted: Vec<String> = recording
+            .take(&LIMITED_ACTIONS_POLICY_MISSING.family)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
         assert_eq!(
-            stats.take(),
+            counted,
             [
                 missing("stale_tweet", "actions"),
                 missing("conversation_control", "copy"),

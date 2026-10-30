@@ -14,7 +14,7 @@ use crate::replay_tests::{
     ACTION_CONTROL_INFO_KEYS, BAKED_POST_RULES, BAKED_USER_RULES, HEADS, SWITCHED_OFF_HEAD,
 };
 
-const SUSPEND: PageAction = PageAction::Suspend {};
+const SUSPEND: PageAction = PageAction::SUSPEND;
 const LIVENESS: PageAction = PageAction::LivenessCheck {};
 const SHR7: PageAction = PageAction::SpamHighRecall {
     lifetime: Lifetime::Days7,
@@ -360,7 +360,7 @@ async fn an_unknown_level_lands_on_missing() {
 }
 
 #[tokio::test]
-async fn weak_evidence_logs_with_the_reason_and_never_takes_a_lower_row() {
+async fn a_live_level_row_acts_whatever_its_evidence_with_its_own_actions() {
     let _serial = overturn_hold::tests::METRICS_LOCK.lock().await;
     let b = bed(vec![
         moved(BB1.0, ControlEntity::User),
@@ -374,21 +374,21 @@ async fn weak_evidence_logs_with_the_reason_and_never_takes_a_lower_row() {
         row(BB1.0, LevelRow::Low, ControlMode::Live, vec![LIVENESS]),
     ])
     .await;
-    let t = b.run_fresh(&high(Account::Clean)).await;
-    assert_eq!(t.status, "success", "{t:?}");
-    assert_eq!(info(&t)["level_row"], "high");
-    assert_eq!(info(&t)["confidence_evidence_supports"], "high");
+    let good = b.run_fresh(&high(Account::Clean)).await;
+    assert_eq!(good.status, "success", "{good:?}");
+    assert_eq!(info(&good)["level_row"], "high");
+    assert_eq!(info(&good)["confidence_evidence_supports"], "high");
 
     let mut old = evidence(ConfidenceLevel::High);
     old.read_at_ms = now_millis() - 31 * DAY_MS;
     let mut typed = evidence(ConfidenceLevel::High);
     typed.reads = 5;
-    for ev in [
-        None,
-        Some(evidence(ConfidenceLevel::Mid)),
-        Some(evidence(ConfidenceLevel::Low)),
-        Some(old),
-        Some(typed),
+    for (ev, supports) in [
+        (None, "none"),
+        (Some(evidence(ConfidenceLevel::Mid)), "mid"),
+        (Some(evidence(ConfidenceLevel::Low)), "low"),
+        (Some(old), "none"),
+        (Some(typed), "none"),
     ] {
         let t = b
             .run_fresh(&with_level(
@@ -397,32 +397,48 @@ async fn weak_evidence_logs_with_the_reason_and_never_takes_a_lower_row() {
                 ev.clone(),
             ))
             .await;
-        assert_logged(&t, "weak_evidence");
-        assert_eq!(info(&t)["level_row"], "high");
         assert_eq!(
-            info(&t)["action_specs"],
-            r#"[{"kind":"suspend","permanent":false,"policy":"PlatformManipulation"}]"#,
-            "the high row's own actions, not mid's or low's: {ev:?}"
+            effect(&t),
+            effect(&good),
+            "the high row's own actions: {ev:?}"
+        );
+        let i = info(&t);
+        assert_eq!(i["level_row"], "high");
+        assert_eq!(i["action_control_mode"], "live", "{ev:?}");
+        assert_eq!(i["confidence_evidence_supports"], supports, "{ev:?}");
+        assert!(!i.contains_key("logged_because"), "{ev:?}");
+        assert!(
+            !i.contains_key(action_control::FORCED_RECORDING_KEY),
+            "{ev:?}"
         );
     }
+}
 
-    let mut overridden = row(BB1.0, LevelRow::High, ControlMode::Live, vec![SUSPEND]);
-    overridden.updated_at_ms = now_millis() - DAY_MS;
-    overridden.evidence_override = Some(Box::new(EvidenceOverride {
-        by: "operator@example.com".into(),
-        reason: "read running".into(),
-        expires_at_ms: now_millis() + DAY_MS,
-    }));
-    let b = bed(vec![moved(BB1.0, ControlEntity::User), overridden]).await;
-    let t = b
-        .run_fresh(&with_level(
-            bb1(Account::Clean),
-            proto::Confidence::High as i32,
-            None,
-        ))
-        .await;
-    assert_eq!(t.status, "success", "{t:?}");
-    assert_eq!(info(&t)["confidence_override_by"], "operator@example.com");
+#[tokio::test]
+async fn a_row_stored_with_an_override_reads_and_acts_and_the_override_is_inert() {
+    let _serial = overturn_hold::tests::METRICS_LOCK.lock().await;
+    let plain = bed(vec![
+        moved(BB1.0, ControlEntity::User),
+        row(BB1.0, LevelRow::High, ControlMode::Live, vec![SUSPEND]),
+    ])
+    .await;
+    let no_read = with_level(bb1(Account::Clean), proto::Confidence::High as i32, None);
+    let want = plain.run_fresh(&no_read).await;
+    assert_eq!(want.status, "success", "{want:?}");
+    for expires_at_ms in [now_millis() + DAY_MS, now_millis() - DAY_MS / 2] {
+        let mut overridden = row(BB1.0, LevelRow::High, ControlMode::Live, vec![SUSPEND]);
+        overridden.updated_at_ms = now_millis() - DAY_MS;
+        overridden.evidence_override = Some(Box::new(EvidenceOverride {
+            by: "operator@example.com".into(),
+            reason: "read running".into(),
+            expires_at_ms,
+        }));
+        let b = bed(vec![moved(BB1.0, ControlEntity::User), overridden]).await;
+        let t = b.run_fresh(&no_read).await;
+        assert_eq!(effect(&t), effect(&want), "{expires_at_ms}");
+        assert_eq!(info(&t)["action_control_mode"], "live");
+        assert!(!info(&t).contains_key("confidence_override_by"));
+    }
 }
 
 #[tokio::test]

@@ -1,4 +1,4 @@
-use super::{Role, Row};
+use super::{Role, Row, Subject};
 use crate::hydration::Hydrator::TrustedFriends;
 use crate::models::TweetFeatures;
 use crate::rules::fixtures::{allow, candidate, dropped, CandidateBuilder};
@@ -18,7 +18,7 @@ pub(super) fn rows() -> Vec<Row> {
     vec![
         Row {
             name: "trusted_friends",
-            post: trusted_friends_post().build(),
+            subject: Subject::Post(trusted_friends_post().build()),
             expect: vec![
                 (TimelineHomeHydration, Role::NonFollower, trusted_friends()),
                 (TimelineHomeHydration, Role::Follower, trusted_friends()),
@@ -46,7 +46,7 @@ pub(super) fn rows() -> Vec<Row> {
         },
         Row {
             name: "trusted_friends_list_member_or_owner",
-            post: trusted_friends_post().with_edge(TrustedFriends).build(),
+            subject: Subject::Post(trusted_friends_post().with_edge(TrustedFriends).build()),
             expect: vec![
                 (TimelineHomeHydration, Role::NonFollower, allow()),
                 (ImmersiveExpandedRecommendations, Role::NonFollower, allow()),

@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use strum::VariantArray;
 use xai_twittercontext_proto::TwitterContextViewer;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -21,6 +23,45 @@ impl Viewer {
     }
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct RequestViewer {
+    id: Option<u64>,
+    country_code: Option<String>,
+    context: Option<Arc<TwitterContextViewer>>,
+}
+
+impl RequestViewer {
+    pub(crate) fn new(raw_id: Option<u64>, country_code: Option<String>) -> Self {
+        Self {
+            id: raw_id.filter(|&id| id.cast_signed() > 0),
+            country_code: country_code.filter(|code| !code.is_empty()),
+            context: None,
+        }
+    }
+
+    pub(crate) fn with_context(raw_id: Option<u64>, context: Option<TwitterContextViewer>) -> Self {
+        let country_code = context
+            .as_ref()
+            .map(|context| context.request_country_code.clone());
+        Self {
+            context: context.map(Arc::new),
+            ..Self::new(raw_id, country_code)
+        }
+    }
+
+    pub(crate) fn id(&self) -> Option<u64> {
+        self.id
+    }
+
+    pub(crate) fn country_code(&self) -> Option<&str> {
+        self.country_code.as_deref()
+    }
+
+    pub(crate) fn context(&self) -> Option<&TwitterContextViewer> {
+        self.context.as_deref()
+    }
+}
+
 pub const ADULT_AGE_YEARS: i32 = 18;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -39,6 +80,22 @@ pub struct ViewerProfile {
     pub has_idv_premium: bool,
     pub is_read_only: bool,
     pub account_country_code: Option<String>,
+    pub is_new_account: bool,
+    pub is_suspended: bool,
+    pub is_deactivated: bool,
+    pub has_uqf_enabled: bool,
+    pub mention_filter_is_following: bool,
+    pub has_blink_label: bool,
+    pub notification_filters: NotificationFilters,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NotificationFilters {
+    pub no_confirmed_email: bool,
+    pub no_confirmed_phone: bool,
+    pub default_profile_image: bool,
+    pub new_users: bool,
+    pub not_followed_by: bool,
 }
 
 impl ViewerProfile {
@@ -51,9 +108,7 @@ impl ViewerProfile {
     }
 }
 
-#[derive(
-    Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, strum::VariantArray,
-)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, strum::VariantArray)]
 pub enum VerifyBlurSupport {
     #[default]
     Unsupported,
@@ -62,28 +117,126 @@ pub enum VerifyBlurSupport {
     Supported,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, strum::VariantArray, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case")]
+pub enum ClientSwitch {
+    ModernBlur,
+    StaleTweetLimits,
+    CommunityViewerRemovedLimits,
+    GoreBlurIgnoresSettings,
+    FosnrRules,
+    FosnrFallbackDrops,
+}
+
+impl ClientSwitch {
+    pub const fn default_on(self) -> bool {
+        match self {
+            Self::StaleTweetLimits | Self::FosnrRules => true,
+            Self::ModernBlur
+            | Self::CommunityViewerRemovedLimits
+            | Self::GoreBlurIgnoresSettings
+            | Self::FosnrFallbackDrops => false,
+        }
+    }
+
+    const fn bit(self) -> u32 {
+        1 << self as u8
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct ClientSwitchSet(u32);
+
+const _: () = assert!(ClientSwitch::VARIANTS.len() <= u32::BITS as usize);
+
+impl ClientSwitchSet {
+    pub const NONE: Self = Self(0);
+
+    pub const DEFAULT_ON: Self = {
+        let mut set = Self::NONE;
+        let mut rest = ClientSwitch::VARIANTS;
+        while let [switch, tail @ ..] = rest {
+            if switch.default_on() {
+                set = set.with(*switch);
+            }
+            rest = tail;
+        }
+        set
+    };
+
+    #[must_use]
+    pub const fn with(self, switch: ClientSwitch) -> Self {
+        Self(self.0 | switch.bit())
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub const fn without(self, switch: ClientSwitch) -> Self {
+        Self(self.0 & !switch.bit())
+    }
+
+    pub const fn contains(self, switch: ClientSwitch) -> bool {
+        self.0 & switch.bit() != 0
+    }
+}
+
+impl std::fmt::Debug for ClientSwitchSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_set()
+            .entries(
+                ClientSwitch::VARIANTS
+                    .iter()
+                    .filter(|&&switch| self.contains(switch)),
+            )
+            .finish()
+    }
+}
+
+impl FromIterator<ClientSwitch> for ClientSwitchSet {
+    fn from_iter<I: IntoIterator<Item = ClientSwitch>>(switches: I) -> Self {
+        switches.into_iter().fold(Self::NONE, Self::with)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClientCapability {
     pub verify_blur_support: Option<VerifyBlurSupport>,
-    pub modern_blur: bool,
-    pub stale_tweet_limits: bool,
-    pub community_viewer_removed_limits: bool,
-    pub gore_blur_ignores_settings: bool,
-    pub fosnr_rules: bool,
-    pub fosnr_fallback_drops: bool,
+    pub switches_on: ClientSwitchSet,
+    pub soft_nsfw_new_user_drop: bool,
+}
+
+impl ClientCapability {
+    pub const DEFAULT: Self = Self {
+        verify_blur_support: Some(VerifyBlurSupport::Unsupported),
+        switches_on: ClientSwitchSet::DEFAULT_ON,
+        soft_nsfw_new_user_drop: false,
+    };
+
+    pub const fn has(self, switch: ClientSwitch) -> bool {
+        self.switches_on.contains(switch)
+    }
+
+    #[must_use]
+    pub const fn with(self, switch: ClientSwitch) -> Self {
+        Self {
+            switches_on: self.switches_on.with(switch),
+            ..self
+        }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub const fn without(self, switch: ClientSwitch) -> Self {
+        Self {
+            switches_on: self.switches_on.without(switch),
+            ..self
+        }
+    }
 }
 
 impl Default for ClientCapability {
     fn default() -> Self {
-        Self {
-            verify_blur_support: Some(VerifyBlurSupport::default()),
-            modern_blur: false,
-            stale_tweet_limits: true,
-            community_viewer_removed_limits: false,
-            gore_blur_ignores_settings: false,
-            fosnr_rules: true,
-            fosnr_fallback_drops: false,
-        }
+        Self::DEFAULT
     }
 }
 

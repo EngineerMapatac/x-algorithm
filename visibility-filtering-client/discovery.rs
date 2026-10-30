@@ -28,6 +28,10 @@ const VF_XDS_BUILD_TIMEOUT: Duration = Duration::from_secs(10);
 
 const VF_XDS_EAGER_RESOLUTION_TIMEOUT: Duration = Duration::from_secs(5);
 
+const VF_READINESS_PROBE_PORT: u16 = 9090;
+
+const VF_READINESS_PROBE_PATH: &str = "/readyz";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VfDiscovery {
     Wily,
@@ -124,39 +128,43 @@ pub(crate) enum VfChannel {
 pub(crate) async fn build_vf_channel(
     params: &VfChannelParams<'_>,
 ) -> Result<VfChannel, VfChannelError> {
-    let name = params.name;
     match params.discovery {
         VfDiscovery::Wily => Ok(VfChannel::Wily(build_vf_wily_channel(params).await?)),
-        VfDiscovery::Xds => {
-            let listener = vf_xds_listener_from_env();
-            let result = match tokio::time::timeout(
-                VF_XDS_BUILD_TIMEOUT,
-                build_xds_channel(params, &listener),
-            )
-            .await
-            {
-                Ok(result) => result,
-                Err(_) => Err(VfChannelError::Connect(anyhow::anyhow!(
-                    "timed out after {}s",
-                    VF_XDS_BUILD_TIMEOUT.as_secs()
-                ))),
-            };
-            match result {
-                Ok(channel) => {
-                    incr_build_metric(name, "xds", "built");
-                    Ok(VfChannel::Xds(channel))
-                }
-                Err(e) => {
-                    warn!(
-                        channel = name,
-                        listener = %listener,
-                        error = %e,
-                        "VF xDS channel build failed"
-                    );
-                    incr_build_metric(name, "xds", "failed");
-                    Err(e)
-                }
-            }
+        VfDiscovery::Xds => Ok(VfChannel::Xds(build_vf_xds_channel(params).await?)),
+    }
+}
+
+pub(crate) async fn build_vf_xds_channel(
+    params: &VfChannelParams<'_>,
+) -> Result<LoadBalancedChannel, VfChannelError> {
+    let name = params.name;
+    let listener = vf_xds_listener_from_env();
+    let result = match tokio::time::timeout(
+        VF_XDS_BUILD_TIMEOUT,
+        build_xds_channel(params, &listener),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(VfChannelError::Connect(anyhow::anyhow!(
+            "timed out after {}s",
+            VF_XDS_BUILD_TIMEOUT.as_secs()
+        ))),
+    };
+    match result {
+        Ok(channel) => {
+            incr_build_metric(name, "xds", "built");
+            Ok(channel)
+        }
+        Err(e) => {
+            warn!(
+                channel = name,
+                listener = %listener,
+                error = %e,
+                "VF xDS channel build failed"
+            );
+            incr_build_metric(name, "xds", "failed");
+            Err(e)
         }
     }
 }
@@ -238,6 +246,7 @@ async fn build_xds_channel(
             e => VfChannelError::Connect(e.into()),
         })?
         .eager_resolution(VF_XDS_EAGER_RESOLUTION_TIMEOUT)
+        .readiness_probe(VF_READINESS_PROBE_PORT, VF_READINESS_PROBE_PATH)
         .buffer_max_wait(DEFAULT_BUFFER_MAX_WAIT)
         .total_timeout(DEFAULT_TOTAL_TIMEOUT)
         .aperture(params.aperture_size);

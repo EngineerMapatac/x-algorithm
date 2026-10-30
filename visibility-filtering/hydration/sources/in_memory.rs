@@ -1,13 +1,13 @@
 use super::*;
 use crate::clients::socialgraph_client::{EdgeDirection, Graph};
+use crate::hydration::fetcher::{FetcherId, Owner};
 use crate::hydration::inventory::Source;
-use std::iter;
 use std::num::NonZeroU64;
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::time::{sleep, Instant};
 use xai_core_entities::entities::{
-    ConversationControlArm, GizmoduckUser, GizmoduckUserResult, PureCoreData, Safety,
+    ConversationControlArm, GizmoduckUser, GizmoduckUserResult, PureCoreData, QuotedTweet, Safety,
     UserResponseState,
 };
 
@@ -48,6 +48,13 @@ pub(crate) fn control(
     }
 }
 
+fn held_in(user_ids: &[u64], holders: &HashSet<u64>) -> HashMap<u64, bool> {
+    user_ids
+        .iter()
+        .map(|&user_id| (user_id, holders.contains(&user_id)))
+        .collect()
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Fault {
     Fails,
@@ -61,6 +68,7 @@ pub(crate) struct InMemorySources {
     pure_cores: HashMap<u64, PureCoreData>,
     tweets: HashMap<u64, TweetFeatures>,
     controls: HashMap<u64, ConversationControl>,
+    quoted_tweets: HashMap<u64, QuotedTweet>,
     labels: HashMap<u64, Arc<vf_pb::SafetyLabelMap>>,
     viewers: HashMap<u64, GizmoduckUser>,
     users: HashMap<u64, GizmoduckUserResult>,
@@ -76,19 +84,21 @@ pub(crate) struct InMemorySources {
     lifecycles: HashMap<u64, ArticleLifecycle>,
     trusted_friends: HashSet<(u64, u64)>,
     viewer_places: HashSet<u64>,
-    faults: Mutex<Vec<(Source, Fault)>>,
-    failed_keys: HashSet<(Source, u64)>,
-    latencies: HashMap<Source, Duration>,
-    key_latencies: HashMap<(Source, u64), Duration>,
+    confirmed_emails: HashSet<u64>,
+    verified_phones: HashSet<u64>,
+    faults: Mutex<Vec<(FetcherId, Fault)>>,
+    failed_keys: HashSet<(FetcherId, u64)>,
+    latencies: HashMap<FetcherId, Duration>,
+    key_latencies: HashMap<(FetcherId, u64), Duration>,
     failed_graphs: HashSet<Graph>,
     failed_edges: HashSet<(Graph, u64)>,
     hung_graphs: HashSet<Graph>,
     missing_graphs: HashSet<Graph>,
-    calls: Mutex<Vec<(Source, Vec<u64>)>>,
+    calls: Mutex<Vec<(FetcherId, Vec<u64>)>>,
     article_viewers: Mutex<Vec<(Source, Option<u64>)>>,
-    starts: Mutex<Vec<(Source, Instant)>>,
+    starts: Mutex<Vec<(FetcherId, Instant)>>,
     selects: Mutex<Vec<Vec<EdgeQuery>>>,
-    fields: Mutex<Vec<(Source, Vec<QueryFields>)>>,
+    fields: Mutex<Vec<(FetcherId, Vec<QueryFields>)>>,
 }
 
 impl InMemorySources {
@@ -141,6 +151,12 @@ impl InMemorySources {
 
     pub(crate) fn control(mut self, tweet_id: u64, control: ConversationControl) -> Self {
         self.controls.insert(tweet_id, control);
+        self
+    }
+
+    pub(crate) fn quote(mut self, outer: u64, tweet_id: u64, user_id: u64) -> Self {
+        self.quoted_tweets
+            .insert(outer, QuotedTweet { tweet_id, user_id });
         self
     }
 
@@ -228,13 +244,24 @@ impl InMemorySources {
         self
     }
 
-    pub(crate) fn fault(self, source: Source, fault: Fault) -> Self {
-        self.break_source(source, fault);
+    pub(crate) fn confirmed_email(mut self, user_id: u64) -> Self {
+        self.confirmed_emails.insert(user_id);
         self
     }
 
-    pub(crate) fn break_source(&self, source: Source, fault: Fault) {
-        self.faults.lock().unwrap().push((source, fault));
+    pub(crate) fn verified_phone(mut self, user_id: u64) -> Self {
+        self.verified_phones.insert(user_id);
+        self
+    }
+
+    pub(crate) fn fault(self, fetcher: impl Into<FetcherId>, fault: Fault) -> Self {
+        self.break_source(fetcher, fault);
+        self
+    }
+
+    pub(crate) fn break_source(&self, fetcher: impl Into<FetcherId>, fault: Fault) {
+        let fetcher = fetcher.into();
+        self.faults.lock().unwrap().push((fetcher, fault));
     }
 
     pub(crate) fn fail_graph(mut self, graph: Graph) -> Self {
@@ -257,36 +284,52 @@ impl InMemorySources {
         self
     }
 
-    pub(crate) fn fail_key(mut self, source: Source, key: u64) -> Self {
-        self.failed_keys.insert((source, key));
+    pub(crate) fn fail_key(mut self, fetcher: impl Into<FetcherId>, key: u64) -> Self {
+        let fetcher = fetcher.into();
+        self.failed_keys.insert((fetcher, key));
         self
     }
 
-    pub(crate) fn latency(mut self, source: Source, latency: Duration) -> Self {
-        self.latencies.insert(source, latency);
+    pub(crate) fn latency(mut self, fetcher: impl Into<FetcherId>, latency: Duration) -> Self {
+        let fetcher = fetcher.into();
+        self.latencies.insert(fetcher, latency);
         self
     }
 
-    pub(crate) fn key_latency(mut self, source: Source, key: u64, latency: Duration) -> Self {
-        self.key_latencies.insert((source, key), latency);
+    pub(crate) fn key_latency(
+        mut self,
+        fetcher: impl Into<FetcherId>,
+        key: u64,
+        latency: Duration,
+    ) -> Self {
+        let fetcher = fetcher.into();
+        self.key_latencies.insert((fetcher, key), latency);
         self
     }
 
     pub(crate) fn calls(&self) -> Vec<Source> {
+        self.fetcher_calls()
+            .into_iter()
+            .map(|fetcher| fetcher.source)
+            .collect()
+    }
+
+    pub(crate) fn fetcher_calls(&self) -> Vec<FetcherId> {
         self.calls
             .lock()
             .unwrap()
             .iter()
-            .map(|(source, _)| *source)
+            .map(|(fetcher, _)| *fetcher)
             .collect()
     }
 
-    pub(crate) fn starts(&self, source: Source) -> Vec<Instant> {
+    pub(crate) fn starts(&self, fetcher: impl Into<FetcherId>) -> Vec<Instant> {
+        let fetcher = fetcher.into();
         self.starts
             .lock()
             .unwrap()
             .iter()
-            .filter(|(called, _)| *called == source)
+            .filter(|(called, _)| *called == fetcher)
             .map(|(_, started)| *started)
             .collect()
     }
@@ -301,12 +344,13 @@ impl InMemorySources {
             .collect()
     }
 
-    pub(crate) fn keys(&self, source: Source) -> Vec<Vec<u64>> {
+    pub(crate) fn keys(&self, fetcher: impl Into<FetcherId>) -> Vec<Vec<u64>> {
+        let fetcher = fetcher.into();
         self.calls
             .lock()
             .unwrap()
             .iter()
-            .filter(|(called, _)| *called == source)
+            .filter(|(called, _)| *called == fetcher)
             .map(|(_, keys)| keys.clone())
             .collect()
     }
@@ -315,34 +359,37 @@ impl InMemorySources {
         self.selects.lock().unwrap().clone()
     }
 
-    pub(crate) fn fields(&self, source: Source) -> Vec<Vec<QueryFields>> {
+    pub(crate) fn fields(&self, fetcher: impl Into<FetcherId>) -> Vec<Vec<QueryFields>> {
+        let fetcher = fetcher.into();
         self.fields
             .lock()
             .unwrap()
             .iter()
-            .filter(|(called, _)| *called == source)
+            .filter(|(called, _)| *called == fetcher)
             .map(|(_, fields)| fields.clone())
             .collect()
     }
 
-    fn record_fields(&self, source: Source, fields: &[QueryFields]) {
-        self.fields.lock().unwrap().push((source, fields.to_vec()));
+    fn record_fields(&self, fetcher: impl Into<FetcherId>, fields: &[QueryFields]) {
+        let fetcher = fetcher.into();
+        self.fields.lock().unwrap().push((fetcher, fields.to_vec()));
     }
 
-    async fn enter(&self, source: Source, keys: &[u64]) -> bool {
+    async fn enter(&self, fetcher: impl Into<FetcherId>, keys: &[u64]) -> bool {
+        let fetcher = fetcher.into();
         let mut sorted = keys.to_vec();
         sorted.sort_unstable();
-        self.calls.lock().unwrap().push((source, sorted));
-        self.starts.lock().unwrap().push((source, Instant::now()));
+        self.calls.lock().unwrap().push((fetcher, sorted));
+        self.starts.lock().unwrap().push((fetcher, Instant::now()));
         let latency = keys
             .iter()
-            .filter_map(|&key| self.key_latencies.get(&(source, key)))
-            .chain(self.latencies.get(&source))
+            .filter_map(|&key| self.key_latencies.get(&(fetcher, key)))
+            .chain(self.latencies.get(&fetcher))
             .max();
         if let Some(latency) = latency {
             sleep(*latency).await;
         }
-        match self.fault_for(source) {
+        match self.fault_for(fetcher) {
             Some(Fault::Hangs) => std::future::pending().await,
             Some(Fault::Delays(delay)) => {
                 tokio::time::sleep(delay).await;
@@ -353,114 +400,23 @@ impl InMemorySources {
         }
     }
 
-    fn fault_for(&self, source: Source) -> Option<Fault> {
+    fn fault_for(&self, fetcher: impl Into<FetcherId>) -> Option<Fault> {
+        let fetcher = fetcher.into();
         self.faults
             .lock()
             .unwrap()
             .iter()
-            .find(|(faulty, _)| *faulty == source)
+            .find(|(faulty, _)| *faulty == fetcher)
             .map(|(_, fault)| *fault)
     }
 
-    async fn keyed<V: Clone>(
+    async fn select(
         &self,
-        source: Source,
-        ids: &[u64],
-        values: &HashMap<u64, V>,
-    ) -> RawHydrationBatch<V> {
-        let fails = self.enter(source, ids).await;
-        let results: FxHashMap<_, _> = ids
-            .iter()
-            .map(|&id| {
-                let result = if fails || self.failed_keys.contains(&(source, id)) {
-                    Err(())
-                } else {
-                    Ok(values.get(&id).cloned())
-                };
-                (id, result)
-            })
-            .collect();
-        HydrationBatch::from_results(ids.iter().copied(), results)
-    }
-}
-
-#[tonic::async_trait]
-impl Sources for InMemorySources {
-    async fn pure_cores(&self, tweet_ids: &[u64]) -> Answered<exchange::TesPureCoreData, PureCore> {
-        let cores = self.keyed(Source::TesPureCoreData, tweet_ids, &self.pure_cores);
-        Observed::quiet(cores.await.map(|core| pure_core(&core)))
-    }
-
-    async fn conversation_roots(
-        &self,
-        root_ids: &[u64],
-    ) -> Answered<exchange::TesConversationRoot, PureCore> {
-        let cores = self.keyed(Source::TesConversationRoot, root_ids, &self.pure_cores);
-        Observed::quiet(cores.await.map(|core| pure_core(&core)))
-    }
-
-    async fn tweets(&self, tweet_ids: &[u64]) -> Answered<exchange::TesTweet, TweetFeatures> {
-        Observed::quiet(self.keyed(Source::TesTweet, tweet_ids, &self.tweets).await)
-    }
-
-    async fn conversation_controls(
-        &self,
-        tweet_ids: &[u64],
-    ) -> Answered<exchange::TesConversationControl, ConversationControl> {
-        Observed::quiet(
-            self.keyed(Source::TesConversationControl, tweet_ids, &self.controls)
-                .await,
-        )
-    }
-
-    async fn safety_labels(
-        &self,
-        tweet_ids: &[u64],
-    ) -> Answered<exchange::SafetyLabels, Arc<vf_pb::SafetyLabelMap>> {
-        Observed::quiet(
-            self.keyed(Source::SafetyLabels, tweet_ids, &self.labels)
-                .await,
-        )
-    }
-
-    async fn viewer(
-        &self,
-        viewer_id: u64,
-        fields: &[QueryFields],
-    ) -> Answered<exchange::GizmoduckViewer, DecodedViewer> {
-        self.record_fields(Source::GizmoduckViewer, fields);
-        let viewer = HashMap::from([(viewer_id, self.viewers.get(&viewer_id).cloned())]);
-        Observed::quiet(
-            self.keyed(Source::GizmoduckViewer, &[viewer_id], &viewer)
-                .await
-                .map(|user| decode_viewer(user.as_ref(), fields)),
-        )
-    }
-
-    async fn users(
-        &self,
-        user_ids: &[u64],
-        fields: &[QueryFields],
-    ) -> Answered<exchange::GizmoduckAuthor, DecodedAuthor> {
-        self.record_fields(Source::GizmoduckAuthor, fields);
-        let users = self
-            .keyed(Source::GizmoduckAuthor, user_ids, &self.users)
-            .await;
-        let users = match self.fault_for(Source::GizmoduckAuthor) {
-            Some(Fault::AnswersPartial) => users.map(|user| GizmoduckUserResult {
-                response_state: Some(UserResponseState::Partial),
-                ..user
-            }),
-            _ => users,
-        };
-        Observed::quiet(author_batch(users))
-    }
-
-    async fn select_edges(
-        &self,
-        viewer_id: u64,
+        fetcher: impl Into<FetcherId>,
+        viewer_id: Option<u64>,
         queries: &[EdgeQuery],
-    ) -> Observed<exchange::Flock, Vec<RawHydrationBatch<bool>>> {
+    ) -> Vec<RawHydrationBatch<bool>> {
+        let fetcher = fetcher.into();
         let mut recorded = queries.to_vec();
         for query in &mut recorded {
             query.destination_ids.sort_unstable();
@@ -473,14 +429,17 @@ impl Sources for InMemorySources {
                     .iter()
                     .any(|&id| self.failed_edges.contains(&(query.graph, id)))
         });
-        let keys: Vec<u64> = iter::once(viewer_id)
-            .chain(
-                queries
-                    .iter()
-                    .flat_map(|query| query.destination_ids.iter().copied()),
-            )
+        let keys: Vec<u64> = viewer_id
+            .into_iter()
+            .chain(queries.iter().flat_map(|query| {
+                query
+                    .from
+                    .id(None)
+                    .into_iter()
+                    .chain(query.destination_ids.iter().copied())
+            }))
             .collect();
-        let fails = self.enter(Source::Flock, &keys).await || failed_graph;
+        let fails = self.enter(fetcher, &keys).await || failed_graph;
         if queries
             .iter()
             .any(|query| self.hung_graphs.contains(&query.graph))
@@ -488,10 +447,11 @@ impl Sources for InMemorySources {
             std::future::pending::<()>().await;
         }
         let answer = |query: &EdgeQuery| {
+            let from = query.from.id(viewer_id)?;
             let holds = |&id: &u64| {
                 let edge = match query.direction {
-                    EdgeDirection::Forward => (query.graph, viewer_id, id),
-                    EdgeDirection::Reverse => (query.graph, id, viewer_id),
+                    EdgeDirection::Forward => (query.graph, from, id),
+                    EdgeDirection::Reverse => (query.graph, id, from),
                 };
                 self.edges.contains(&edge)
             };
@@ -507,32 +467,180 @@ impl Sources for InMemorySources {
         let sets: Result<Vec<_>, _> = (!fails)
             .then(|| queries.iter().map(answer).collect())
             .ok_or_else(|| tonic::Status::unavailable("select failed"));
-        Observed::quiet(edge_batches(queries, sets.as_deref()))
+        edge_batches(queries, sets.as_deref())
     }
 
-    async fn viewer_country(&self, viewer_id: u64) -> Answered<exchange::ViewerCountry, Arc<str>> {
-        Observed::quiet(
-            self.keyed(Source::ViewerCountry, &[viewer_id], &self.countries)
-                .await,
-        )
+    async fn users_as(
+        &self,
+        fetcher: impl Into<FetcherId>,
+        user_ids: &[u64],
+        fields: &[QueryFields],
+    ) -> RawHydrationBatch<DecodedAuthor> {
+        let fetcher = fetcher.into();
+        self.record_fields(fetcher, fields);
+        let users = self.keyed(fetcher, user_ids, &self.users).await;
+        let users = match self.fault_for(fetcher) {
+            Some(Fault::AnswersPartial) => users.map(|user| GizmoduckUserResult {
+                response_state: Some(UserResponseState::Partial),
+                ..user
+            }),
+            _ => users,
+        };
+        author_batch(users)
+    }
+
+    async fn keyed<V: Clone>(
+        &self,
+        fetcher: impl Into<FetcherId>,
+        ids: &[u64],
+        values: &HashMap<u64, V>,
+    ) -> RawHydrationBatch<V> {
+        let fetcher = fetcher.into();
+        let fails = self.enter(fetcher, ids).await;
+        let results: FxHashMap<_, _> = ids
+            .iter()
+            .map(|&id| {
+                let result = if fails || self.failed_keys.contains(&(fetcher, id)) {
+                    Err(())
+                } else {
+                    Ok(values.get(&id).cloned())
+                };
+                (id, result)
+            })
+            .collect();
+        HydrationBatch::from_results(ids.iter().copied(), results)
+    }
+}
+
+#[tonic::async_trait]
+impl Sources for InMemorySources {
+    async fn pure_cores(&self, owner: Owner, tweet_ids: &[u64]) -> RawHydrationBatch<PureCore> {
+        let fetcher = FetcherId {
+            source: Source::TesPureCoreData,
+            owner,
+        };
+        let cores = self.keyed(fetcher, tweet_ids, &self.pure_cores).await;
+        cores.map(|core| pure_core(&core))
+    }
+
+    async fn tweets(&self, tweet_ids: &[u64]) -> RawHydrationBatch<TweetFeatures> {
+        self.keyed(Source::TesTweetForVisibility, tweet_ids, &self.tweets)
+            .await
+    }
+
+    async fn conversation_controls(
+        &self,
+        tweet_ids: &[u64],
+    ) -> RawHydrationBatch<ConversationControl> {
+        self.keyed(Source::TesConversationControl, tweet_ids, &self.controls)
+            .await
+    }
+
+    async fn quoted_tweets(&self, outer_ids: &[u64]) -> RawHydrationBatch<QuotedTweet> {
+        self.keyed(Source::TesQuotedTweet, outer_ids, &self.quoted_tweets)
+            .await
+    }
+
+    async fn safety_labels(
+        &self,
+        owner: Owner,
+        tweet_ids: &[u64],
+    ) -> RawHydrationBatch<Arc<vf_pb::SafetyLabelMap>> {
+        let fetcher = FetcherId {
+            source: Source::SafetyLabels,
+            owner,
+        };
+        self.keyed(fetcher, tweet_ids, &self.labels).await
+    }
+
+    async fn viewer(
+        &self,
+        viewer_id: u64,
+        fields: &[QueryFields],
+    ) -> RawHydrationBatch<DecodedViewer> {
+        self.record_fields(Source::GizmoduckViewer, fields);
+        let viewer = HashMap::from([(viewer_id, self.viewers.get(&viewer_id).cloned())]);
+        self.keyed(Source::GizmoduckViewer, &[viewer_id], &viewer)
+            .await
+            .map(|user| decode_viewer(user.as_ref(), fields))
+    }
+
+    async fn users(
+        &self,
+        owner: Owner,
+        user_ids: &[u64],
+        fields: &[QueryFields],
+    ) -> RawHydrationBatch<DecodedAuthor> {
+        let fetcher = FetcherId {
+            source: Source::GizmoduckAuthor,
+            owner,
+        };
+        self.users_as(fetcher, user_ids, fields).await
+    }
+
+    async fn actors(
+        &self,
+        user_ids: &[u64],
+        fields: &[QueryFields],
+    ) -> RawHydrationBatch<DecodedActor> {
+        self.record_fields(Source::GizmoduckActor, fields);
+        let users = self
+            .keyed(Source::GizmoduckActor, user_ids, &self.users)
+            .await;
+        let users = match self.fault_for(Source::GizmoduckActor) {
+            Some(Fault::AnswersPartial) => users.map(|user| GizmoduckUserResult {
+                response_state: Some(UserResponseState::Partial),
+                ..user
+            }),
+            _ => users,
+        };
+        actor_batch(users)
+    }
+
+    async fn confirmed_emails(&self, user_ids: &[u64]) -> RawHydrationBatch<bool> {
+        let held = held_in(user_ids, &self.confirmed_emails);
+        self.keyed(Source::ActorEmails, user_ids, &held).await
+    }
+
+    async fn verified_phones(&self, user_ids: &[u64]) -> RawHydrationBatch<bool> {
+        let held = held_in(user_ids, &self.verified_phones);
+        self.keyed(Source::ActorPhones, user_ids, &held).await
+    }
+
+    async fn select_edges(
+        &self,
+        owner: Owner,
+        viewer_id: Option<u64>,
+        queries: &[EdgeQuery],
+    ) -> Edges {
+        let fetcher = FetcherId {
+            source: Source::Flock,
+            owner,
+        };
+        Ok(self.select(fetcher, viewer_id, queries).await)
+    }
+
+    async fn viewer_country(&self, viewer_id: u64) -> RawHydrationBatch<Arc<str>> {
+        self.keyed(Source::ViewerCountry, &[viewer_id], &self.countries)
+            .await
     }
 
     async fn second_degree(
         &self,
         viewer_id: u64,
         root_author_ids: &[u64],
-    ) -> Answered<exchange::Wingman, bool> {
+    ) -> RawHydrationBatch<bool> {
         let paths = root_author_ids
             .iter()
             .map(|&root| (root, self.second_degree.contains(&(root, viewer_id))))
             .collect();
-        Observed::quiet(self.keyed(Source::Wingman, root_author_ids, &paths).await)
+        self.keyed(Source::Wingman, root_author_ids, &paths).await
     }
 
     async fn community_moderations(
         &self,
         posts: &[CommunityPost],
-    ) -> Answered<exchange::CommunityModeration, CommunityModeration> {
+    ) -> RawHydrationBatch<CommunityModeration> {
         self.community_posts
             .lock()
             .unwrap()
@@ -545,114 +653,94 @@ impl Sources for InMemorySources {
                 (id, moderation.unwrap_or_default())
             })
             .collect();
-        Observed::quiet(
-            self.keyed(Source::CommunityModeration, &tweet_ids, &moderations)
-                .await,
-        )
+        self.keyed(Source::CommunityModeration, &tweet_ids, &moderations)
+            .await
     }
 
     async fn community_moderators(
         &self,
         _viewer_id: u64,
         community_ids: &[u64],
-    ) -> Answered<exchange::CommunityModerator, bool> {
+    ) -> RawHydrationBatch<bool> {
         let moderators = community_ids
             .iter()
             .map(|&id| (id, self.moderated_communities.contains(&id)))
             .collect();
-        Observed::quiet(
-            self.keyed(Source::CommunityModerator, community_ids, &moderators)
-                .await,
-        )
+        self.keyed(Source::CommunityModerator, community_ids, &moderators)
+            .await
     }
 
     async fn community_viewer_removals(
         &self,
         _viewer_id: u64,
         community_ids: &[u64],
-    ) -> Answered<exchange::CommunityViewerRemoved, bool> {
+    ) -> RawHydrationBatch<bool> {
         let removals = community_ids
             .iter()
             .map(|&id| (id, self.removed_from_communities.contains(&id)))
             .collect();
-        Observed::quiet(
-            self.keyed(Source::CommunityViewerRemoved, community_ids, &removals)
-                .await,
-        )
+        self.keyed(Source::CommunityViewerRemoved, community_ids, &removals)
+            .await
     }
 
     async fn article_media_entities(
         &self,
         viewer_id: Option<u64>,
         article_ids: &[u64],
-    ) -> Answered<exchange::ArticleMediaEntities, bool> {
+    ) -> RawHydrationBatch<bool> {
         self.article_viewers
             .lock()
             .unwrap()
             .push((Source::ArticleMediaEntities, viewer_id));
-        Observed::quiet(
-            self.keyed(
-                Source::ArticleMediaEntities,
-                article_ids,
-                &self.article_media_entities,
-            )
-            .await,
+        self.keyed(
+            Source::ArticleMediaEntities,
+            article_ids,
+            &self.article_media_entities,
         )
+        .await
     }
 
     async fn article_cover_media(
         &self,
         viewer_id: Option<u64>,
         article_ids: &[u64],
-    ) -> Answered<exchange::ArticleCoverMedia, bool> {
+    ) -> RawHydrationBatch<bool> {
         self.article_viewers
             .lock()
             .unwrap()
             .push((Source::ArticleCoverMedia, viewer_id));
-        Observed::quiet(
-            self.keyed(
-                Source::ArticleCoverMedia,
-                article_ids,
-                &self.article_cover_media,
-            )
-            .await,
+        self.keyed(
+            Source::ArticleCoverMedia,
+            article_ids,
+            &self.article_cover_media,
         )
+        .await
     }
 
-    async fn article_lifecycles(
-        &self,
-        article_ids: &[u64],
-    ) -> Answered<exchange::ArticleLifecycle, ArticleLifecycle> {
-        Observed::quiet(
-            self.keyed(Source::ArticleLifecycle, article_ids, &self.lifecycles)
-                .await,
-        )
+    async fn article_lifecycles(&self, article_ids: &[u64]) -> RawHydrationBatch<ArticleLifecycle> {
+        self.keyed(Source::ArticleLifecycle, article_ids, &self.lifecycles)
+            .await
     }
 
-    async fn trusted_friends(
-        &self,
-        viewer_id: u64,
-        list_ids: &[u64],
-    ) -> Answered<exchange::TrustedFriends, bool> {
+    async fn trusted_friends(&self, viewer_id: u64, list_ids: &[u64]) -> RawHydrationBatch<bool> {
         let lists = list_ids
             .iter()
             .map(|&list| (list, self.trusted_friends.contains(&(list, viewer_id))))
             .collect();
-        Observed::quiet(self.keyed(Source::TrustedFriends, list_ids, &lists).await)
+        self.keyed(Source::TrustedFriends, list_ids, &lists).await
     }
 
-    async fn outside_places(
-        &self,
-        _viewer_id: u64,
-        place_ids: &[u64],
-    ) -> Answered<exchange::UserLocation, bool> {
+    async fn outside_places(&self, _viewer_id: u64, place_ids: &[u64]) -> RawHydrationBatch<bool> {
         let outside = place_ids
             .iter()
             .map(|&place| (place, !self.viewer_places.contains(&place)))
             .collect();
-        Observed::quiet(self.keyed(Source::UserLocation, place_ids, &outside).await)
+        self.keyed(Source::UserLocation, place_ids, &outside).await
     }
+}
 
+#[tonic::async_trait]
+impl PostCards for InMemorySources {
     async fn post_card(&self, tweet_id: u64) -> Option<PostCard> {
         if matches!(self.fault_for(Source::TesPureCoreData), Some(Fault::Fails)) {
             return None;

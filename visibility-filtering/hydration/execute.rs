@@ -1,24 +1,28 @@
 use crate::hydration::batch::{Hydrated, HydrationBatch, RawHydrationBatch};
-use crate::hydration::decode::author::{AuthorColumn, DecodedAuthor};
+use crate::hydration::decode::author::{AuthorColumn, DecodedActor, DecodedAuthor};
 use crate::hydration::decode::tweet::{PureCoreColumn, TweetRowColumn};
 use crate::hydration::decode::viewer::DecodedViewer;
 use crate::hydration::fallback_cache::{Column, FallbackCache, FallbackCaches};
+use crate::hydration::fetcher::Owner;
 use crate::hydration::hydrator::Edge;
 use crate::hydration::inventory::Source;
 use crate::hydration::metrics::{
-    self, record_batch_size, record_expanded_batch, record_flock_missing_keys,
-    record_keyed_hydrator_request, record_request_country, record_viewer_country,
-    record_viewer_not_age_verified, record_viewer_state,
+    record_flock_missing_keys, record_keyed_hydrator_request, record_request_country,
+    record_viewer_country,
 };
 use crate::hydration::plan::Group;
-use crate::hydration::sources::{Answered, Sources};
+use crate::hydration::sources::{Expired, Sources};
 use crate::hydration::store::{CallRequest, Landing, Store};
 use crate::hydration::{Hydration, HydrationPlan, HydrationRequest, Hydrator};
+use crate::metrics::families::{
+    HYDRATOR_EXPANDED_BATCHES, HYDRATOR_EXPANDED_KEYS, HYDRATOR_LATENCY_MS,
+    VIEWER_NOT_AGE_VERIFIED, VIEWER_STATE,
+};
+use crate::metrics::{Metrics, RequestLevel, RequestMetrics};
 use crate::models::{
-    ArticleLifecycle, AuthorId, CommunityModeration, PureCore, TweetFeatures, Viewer, ViewerAge,
+    ArticleLifecycle, CommunityModeration, PureCore, TweetFeatures, Viewer, ViewerAge,
 };
 use crate::params::CountryList;
-use crate::rules::SafetyLevel;
 use futures::future::BoxFuture;
 use futures::stream::{FuturesUnordered, StreamExt};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -28,7 +32,7 @@ use std::mem;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use xai_core_entities::entities::ConversationControl;
+use xai_core_entities::entities::{ConversationControl, QuotedTweet};
 use xai_visibility_filtering_proto as vf_pb;
 use xai_x_rpc::WithBudget;
 
@@ -84,9 +88,13 @@ fn age_verification_prompted(
     Some((country, age))
 }
 
-fn record_age_verification_prompted(plan: &HydrationPlan, hydration: &Hydration) {
-    let answered = !hydration.incomplete.contains(Hydrator::ViewerLabels)
-        && !hydration.incomplete.contains(Hydrator::ViewerProfile);
+fn record_age_verification_prompted(
+    metrics: &Metrics,
+    plan: &HydrationPlan,
+    hydration: &Hydration,
+) {
+    let answered = !hydration.viewer_failed.contains(Hydrator::ViewerLabels)
+        && !hydration.viewer_failed.contains(Hydrator::ViewerProfile);
     if plan.reads_viewer_labels()
         && answered
         && let Some((country, age)) = age_verification_prompted(
@@ -94,36 +102,39 @@ fn record_age_verification_prompted(plan: &HydrationPlan, hydration: &Hydration)
             hydration.viewer.country_code.as_deref(),
         )
     {
-        record_viewer_not_age_verified(country, age.into());
+        metrics.count(&VIEWER_NOT_AGE_VERIFIED, [country, age.into()], 1);
     }
 }
 
-fn record_viewer(plan: &HydrationPlan, hydration: &Hydration) {
-    record_age_verification_prompted(plan, hydration);
+fn record_viewer(metrics: &RequestMetrics, plan: &HydrationPlan, hydration: &Hydration) {
+    record_age_verification_prompted(metrics.plain(), plan, hydration);
     if !plan.reads_viewer_profile() {
         return;
     }
     let state = match &hydration.viewer.viewer {
         Viewer::LoggedOut => NoViewerState::LoggedOut.into(),
-        Viewer::LoggedIn { .. } if hydration.incomplete.contains(Hydrator::ViewerProfile) => {
+        Viewer::LoggedIn { .. } if hydration.viewer_failed.contains(Hydrator::ViewerProfile) => {
             NoViewerState::Failed.into()
         }
         Viewer::LoggedIn { .. } => hydration
             .viewer_state
             .map_or(NoViewerState::NotFound.into(), <&str>::from),
     };
-    record_viewer_state(state, plan.level());
-    record_request_country(hydration.viewer.country_code.as_deref());
+    metrics.count(&VIEWER_STATE, [state], 1);
+    record_request_country(metrics.plain(), hydration.viewer.country_code.as_deref());
 }
 
 pub(super) enum Reply {
     PureCores(RawHydrationBatch<PureCore>),
-    RootAuthors(RawHydrationBatch<AuthorId>),
     Tweets(RawHydrationBatch<TweetFeatures>),
     Controls(RawHydrationBatch<ConversationControl>),
+    QuotedTweets(RawHydrationBatch<QuotedTweet>),
     Labels(RawHydrationBatch<Arc<vf_pb::SafetyLabelMap>>),
     Viewer(RawHydrationBatch<DecodedViewer>),
     Authors(RawHydrationBatch<DecodedAuthor>),
+    Actors(RawHydrationBatch<DecodedActor>),
+    ActorEmails(RawHydrationBatch<bool>),
+    ActorPhones(RawHydrationBatch<bool>),
     Select(Vec<RawHydrationBatch<bool>>),
     Edge(Edge, RawHydrationBatch<bool>),
     ViewerCountry(RawHydrationBatch<Arc<str>>),
@@ -137,37 +148,40 @@ pub(super) enum Reply {
 
 type InFlight<'p> = Pin<Box<dyn Future<Output = (CallRequest<'p>, Reply)> + Send + 'p>>;
 
-struct Timed {
-    client: String,
-    method: String,
-    level: SafetyLevel,
-    ceiling: Duration,
+struct Timed<'p> {
+    metrics: &'p RequestMetrics,
+    backend: &'static str,
+    call: &'static str,
+    call_deadline: Duration,
     candidate_count_by_claimed_key: FxHashMap<u64, usize>,
 }
 
-impl Timed {
+impl<'p> Timed<'p> {
     async fn run<V, A: AsRef<[RawHydrationBatch<V>]>>(
         &self,
-        call: impl Future<Output = A>,
-        timed_out: impl FnOnce(RawHydrationBatch<V>) -> A,
+        call: impl Future<Output = Result<A, Expired>>,
+        failed: impl FnOnce(RawHydrationBatch<V>) -> A,
     ) -> A {
         let start = Instant::now();
-        let answer = call.with_budget(self.ceiling).await.unwrap_or_else(|_| {
-            let claimed = self.candidate_count_by_claimed_key.keys().copied();
-            timed_out(HydrationBatch::timed_out(claimed))
-        });
+        let answer = call
+            .with_budget(self.call_deadline)
+            .await
+            .unwrap_or(Err(Expired));
         record_keyed_hydrator_request(
-            &self.client,
-            &self.method,
-            self.level,
+            self.metrics,
+            self.backend,
+            self.call,
             &self.candidate_count_by_claimed_key,
-            &answer,
+            answer.as_ref(),
             start.elapsed().as_secs_f64() * 1000.0,
         );
-        answer
+        answer.unwrap_or_else(|Expired| {
+            let claimed = self.candidate_count_by_claimed_key.keys().copied();
+            failed(HydrationBatch::failed(claimed))
+        })
     }
 
-    fn keyed<'p, X, V, G>(
+    fn keyed<V, G>(
         self,
         call: CallRequest<'p>,
         get: G,
@@ -175,12 +189,11 @@ impl Timed {
         reply: fn(RawHydrationBatch<V>) -> Reply,
     ) -> InFlight<'p>
     where
-        X: 'p,
         V: Send + 'p,
-        G: for<'c> FnOnce(&'c CallRequest<'p>) -> BoxFuture<'c, Answered<X, V>> + Send + 'p,
+        G: for<'c> FnOnce(&'c CallRequest<'p>) -> BoxFuture<'c, RawHydrationBatch<V>> + Send + 'p,
     {
         Box::pin(async move {
-            let get = async { get(&call).await.into_inner() };
+            let get = async { Ok(get(&call).await) };
             let answer = self.run(get, identity).await;
             (call, reply(after(answer)))
         })
@@ -193,87 +206,102 @@ impl HydrationPlan {
         sources: &dyn Sources,
         request: HydrationRequest<'_>,
     ) -> Hydration {
+        debug_assert!(
+            matches!(request.metrics.level(), RequestLevel::Named(level) if level == self.level()),
+            "{:?} hydrates under another request's metrics",
+            self.level()
+        );
         let started = Instant::now();
         let mut store = Store::new(
             self,
             request.viewer_id,
             request.client_capability,
-            request.raw_candidates,
-            request.is_expanding_retweet_sources,
-        );
+            &request.raw_candidates,
+            request.retweet_merge,
+        )
+        .with_quotes(&request.quotes)
+        .with_users(&request.users);
         let mut running: FuturesUnordered<InFlight<'_>> = FuturesUnordered::new();
         let inputless = || self.groups().filter(|g| g.input.is_none());
         let mut ready: Vec<&Group> = inputless().collect();
         loop {
             while let Some(group) = ready.pop() {
                 if let Some(call) = store.offer(group) {
-                    running.extend(self.send(call, sources, request.fallback_caches));
+                    let call_deadline = self.call_deadline(group, call.claimed_edges());
+                    running.extend(Self::send(
+                        call,
+                        call_deadline,
+                        sources,
+                        request.fallback_caches,
+                        request.metrics,
+                    ));
                 }
             }
             let Some((call, reply)) = running.next().await else {
                 break;
             };
             let group = call.group;
-            if store.land(&call, reply, started.elapsed()) == Landing::SourcesJoined {
+            if store.land(&call, reply, started.elapsed()) == Landing::KeysJoined {
                 ready.extend(inputless());
             }
             ready.extend(self.readers(group));
         }
+        let metrics = request.metrics;
         if store.is_country_lookup_skipped() {
-            record_viewer_country(ViewerCountry::NoAllowedList.into(), self.level());
+            record_viewer_country(metrics, ViewerCountry::NoAllowedList.into());
         }
-        metrics::record_tes_join_latency(
-            self.level(),
-            store
-                .tweets_elapsed
-                .map_or(store.core_elapsed, |tweets| tweets.max(store.core_elapsed)),
+        let tes_joined = store
+            .tweets_elapsed
+            .map_or(store.core_elapsed, |tweets| tweets.max(store.core_elapsed));
+        metrics.plain().observe(
+            &HYDRATOR_LATENCY_MS,
+            ["tes", "join"],
+            tes_joined.as_secs_f64() * 1000.0,
         );
         let hydration = store.assemble(request);
-        record_viewer(self, &hydration);
+        record_viewer(metrics, self, &hydration);
         hydration
     }
 
     fn send<'p>(
-        &'p self,
         mut call: CallRequest<'p>,
+        call_deadline: Duration,
         sources: &'p dyn Sources,
         fallback_caches: &'p FallbackCaches,
+        metrics: &'p RequestMetrics,
     ) -> Option<InFlight<'p>> {
-        let tweet_cache = fallback_caches.tweets.as_ref();
-        let author_cache = fallback_caches.authors.as_ref();
-        let level = self.level();
+        let plain = metrics.plain();
         let group = call.group;
-        let (client, method) = group.label();
-        if let Some(size) = call.batch_size {
-            record_batch_size(&client, size);
-        }
+        let owner = group.fetcher.owner;
+        let tweet_cache = fallback_caches.tweets.as_ref();
+        let author_cache = fallback_caches
+            .authors
+            .as_ref()
+            .filter(|_| owner == Owner::Request);
+        let (backend, call_name) = group.label();
         if !call.is_first {
-            record_expanded_batch(&client, &method, call.key_count);
+            let keys = call.key_count as u64;
+            plain.count(&HYDRATOR_EXPANDED_BATCHES, [backend, call_name], 1);
+            plain.count(&HYDRATOR_EXPANDED_KEYS, [backend, call_name], keys);
         }
         let timed = Timed {
-            client,
-            method,
-            level,
-            ceiling: group.ceiling(),
+            metrics,
+            backend,
+            call: call_name,
+            call_deadline,
             candidate_count_by_claimed_key: mem::take(&mut call.candidate_count_by_claimed_key),
         };
-        let in_flight: InFlight<'p> = match group.source {
+        let in_flight: InFlight<'p> = match group.fetcher.source {
             Source::TesPureCoreData => timed.keyed(
                 call,
-                |call| sources.pure_cores(&call.keys),
-                move |pure_cores| fall_back::<PureCoreColumn>(tweet_cache, pure_cores),
+                move |call| sources.pure_cores(owner, &call.keys),
+                move |pure_cores| fall_back::<PureCoreColumn>(plain, tweet_cache, pure_cores),
                 Reply::PureCores,
             ),
-            Source::TesConversationRoot => timed.keyed(
-                call,
-                |call| sources.conversation_roots(&call.keys),
-                move |roots| fall_back::<PureCoreColumn>(tweet_cache, roots),
-                |roots| Reply::RootAuthors(roots.map(|root| root.author_id)),
-            ),
-            Source::TesTweet => timed.keyed(
+            Source::TesTweetForVisibility => timed.keyed(
                 call,
                 |call| sources.tweets(&call.keys),
-                move |tweets| fall_back::<TweetRowColumn>(tweet_cache, tweets),
+                move |tweets| fall_back::<TweetRowColumn>(plain, tweet_cache, tweets),
                 Reply::Tweets,
             ),
             Source::TesConversationControl => timed.keyed(
@@ -282,9 +310,15 @@ impl HydrationPlan {
                 identity,
                 Reply::Controls,
             ),
+            Source::TesQuotedTweet => timed.keyed(
+                call,
+                |call| sources.quoted_tweets(&call.keys),
+                identity,
+                Reply::QuotedTweets,
+            ),
             Source::SafetyLabels => timed.keyed(
                 call,
-                |call| sources.safety_labels(&call.keys),
+                move |call| sources.safety_labels(owner, &call.keys),
                 identity,
                 Reply::Labels,
             ),
@@ -299,27 +333,41 @@ impl HydrationPlan {
             }
             Source::GizmoduckAuthor => timed.keyed(
                 call,
-                |call| sources.users(&call.keys, group.fields()),
-                move |authors| fall_back::<AuthorColumn>(author_cache, authors),
+                move |call| sources.users(owner, &call.keys, group.fields()),
+                move |authors| fall_back::<AuthorColumn>(plain, author_cache, authors),
                 Reply::Authors,
             ),
-            Source::Flock => {
-                let viewer_id = call.viewer_id?;
-                Box::pin(async move {
-                    let select = async {
-                        let edges = sources
-                            .select_edges(viewer_id, &call.queries)
-                            .await
-                            .into_inner();
-                        let (edges, missing) = missing_sets_read_no_edge(edges);
-                        record_flock_missing_keys(&timed.client, &timed.method, level, missing);
-                        edges
-                    };
-                    let per_query = |timed_out| vec![timed_out; call.queries.len()];
-                    let edges = timed.run(select, per_query).await;
-                    (call, Reply::Select(edges))
-                })
-            }
+            Source::GizmoduckActor => timed.keyed(
+                call,
+                |call| sources.actors(&call.keys, group.fields()),
+                identity,
+                Reply::Actors,
+            ),
+            Source::ActorEmails => timed.keyed(
+                call,
+                |call| sources.confirmed_emails(&call.keys),
+                identity,
+                Reply::ActorEmails,
+            ),
+            Source::ActorPhones => timed.keyed(
+                call,
+                |call| sources.verified_phones(&call.keys),
+                identity,
+                Reply::ActorPhones,
+            ),
+            Source::Flock => Box::pin(async move {
+                let select = async {
+                    let edges = sources
+                        .select_edges(owner, call.viewer_id, call.queries())
+                        .await?;
+                    let (edges, missing) = missing_sets_read_no_edge(edges);
+                    record_flock_missing_keys(metrics, timed.backend, timed.call, missing);
+                    Ok(edges)
+                };
+                let per_query = |failed| vec![failed; call.queries().len()];
+                let edges = timed.run(select, per_query).await;
+                (call, Reply::Select(edges))
+            }),
             Source::ViewerCountry => {
                 let viewer_id = call.viewer_id?;
                 timed.keyed(
@@ -331,7 +379,7 @@ impl HydrationPlan {
                             Some(Hydrated::NotFound) => ViewerCountry::NoRow,
                             _ => ViewerCountry::Failed,
                         };
-                        record_viewer_country(result.into(), level);
+                        record_viewer_country(metrics, result.into());
                         country
                     },
                     Reply::ViewerCountry,
@@ -412,11 +460,12 @@ impl HydrationPlan {
 }
 
 fn fall_back<C: Column>(
+    metrics: &Metrics,
     cache: Option<&FallbackCache<C::Entry>>,
     batch: RawHydrationBatch<C::Value>,
 ) -> RawHydrationBatch<C::Value> {
     match cache {
-        Some(cache) => cache.resolve_hydration_batch::<C>(batch),
+        Some(cache) => cache.resolve_hydration_batch::<C>(metrics, batch),
         None => batch,
     }
 }
@@ -444,31 +493,31 @@ fn missing_sets_read_no_edge(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clients::socialgraph_client::{EdgeDirection, EdgeQuery, Graph};
+    use crate::clients::socialgraph_client::{EdgeDirection, EdgeFrom, EdgeQuery, Graph};
     use crate::hydration::decode::author::fallback_cache;
     use crate::hydration::decode::tweet::tweet_fallback_cache;
+    use crate::hydration::fetcher::FetcherId;
     use crate::hydration::sources::{Fault, InMemorySources, control, suspended};
     use crate::hydration::{
         BEST_EFFORT_HYDRATION_TIMEOUT, Cause, HYDRATION_TIMEOUT, Hydrator, Hydrators, Lookup,
-        Unresolved,
+        Relation, Unresolved,
     };
-    use crate::metrics::Rpc;
+    use crate::metrics::families::HYDRATOR_TWEET_IDS;
+    use crate::metrics::{Endpoint, RequestLevel};
     use crate::models::{
-        ArticleLifecycle, ClientCapability, Evaluation, TweetId, Viewer, ViewerProfile,
+        ArticleLifecycle, AuthorId, ClientCapability, ClientSwitch, Evaluation, Placement,
+        RetweetMerge, SafetyLabelType, TweetId, Viewer, ViewerProfile,
     };
     use crate::rules::{RuleEngine, SafetyLevel};
-    use crate::scenario::{InRequestOrder, Scenario, raw};
-    use std::cell::RefCell;
-    use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+    use crate::scenario::{InRequestOrder, Scenario, label_map, protected_user, raw, reaction_to};
+    use std::collections::{BTreeSet, HashMap, HashSet};
     use std::fmt::Write;
     use std::num::NonZeroU64;
-    use strum::VariantArray;
     use xai_core_entities::entities::{
         ConversationControlArm, ExtendedProfile, GizmoduckUser, GizmoduckUserResult, PureCoreData,
         UserResponseState,
     };
     use xai_core_entities::gizmoduck_client::QueryFields;
-    use xai_stats_receiver::{HistogramBuckets, StatsReceiverExt};
 
     const VIEWER: u64 = 50;
 
@@ -477,10 +526,7 @@ mod tests {
         level: SafetyLevel,
         viewer_id: Option<u64>,
     ) -> Scenario<InMemorySources> {
-        let client = ClientCapability {
-            community_viewer_removed_limits: true,
-            ..ClientCapability::default()
-        };
+        let client = ClientCapability::DEFAULT.with(ClientSwitch::CommunityViewerRemovedLimits);
         Scenario::new(sources, level)
             .viewer(viewer_id)
             .country("US")
@@ -574,7 +620,7 @@ mod tests {
             (
                 "failed tweet row",
                 TimelineHome,
-                world().fail_key(Source::TesTweet, 1),
+                world().fail_key(Source::TesTweetForVisibility, 1),
                 vec![],
                 vec![(TweetId(1), tweet_failed())],
             ),
@@ -652,8 +698,8 @@ mod tests {
     async fn each_candidate_carries_the_nodes_that_failed_for_it() {
         use ConversationControlArm::MyNetwork;
         use Hydrator::{
-            BlockedByAuthor, BlockedByConversationRoot, Blocks, Follows, MuteRetweets, Mutes,
-            RootFollowsViewer, RootFollowsViewerSecondDegree,
+            BlockedByAuthor, Blocks, Follows, MuteRetweets, Mutes, RootFollowsViewer,
+            RootFollowsViewerSecondDegree,
         };
         use SafetyLevel::{TimelineHome, TimelineHomeHydration};
         let world = || {
@@ -670,7 +716,7 @@ mod tests {
                 Some(VIEWER),
                 world()
                     .tweet_features(2, exclusive_tweet())
-                    .fail_key(Source::TesTweet, 1),
+                    .fail_key(Source::TesTweetForVisibility, 1),
                 [Err(tweet_failed()), Ok(Hydrators::empty())],
             ),
             (
@@ -683,7 +729,6 @@ mod tests {
                 [
                     Ok(Hydrators::of(RootFollowsViewer)
                         .with(RootFollowsViewerSecondDegree)
-                        .with(BlockedByConversationRoot)
                         .with(Follows)
                         .with(BlockedByAuthor)),
                     Ok(Hydrators::of(Follows).with(BlockedByAuthor)),
@@ -759,7 +804,7 @@ mod tests {
             .tweet(1, 10)
             .user(10, suspended())
             .edge(Graph::Follows, VIEWER, 10)
-            .fault(Source::TesTweet, Fault::Hangs);
+            .fault(Source::TesTweetForVisibility, Fault::Hangs);
         let raw = [raw(1, None)];
         let started = tokio::time::Instant::now();
         let scenario = executor(sources, SafetyLevel::TimelineHome, Some(VIEWER));
@@ -799,7 +844,7 @@ mod tests {
                 "SafetyLabels",
                 "TesConversationControl",
                 "TesPureCoreData",
-                "TesTweet"
+                "TesTweetForVisibility"
             ]
         );
 
@@ -816,11 +861,13 @@ mod tests {
                 EdgeQuery {
                     graph: Graph::Follows,
                     direction: EdgeDirection::Forward,
+                    from: EdgeFrom::Viewer,
                     destination_ids: vec![10],
                 },
                 EdgeQuery {
                     graph: Graph::Blocks,
                     direction: EdgeDirection::Reverse,
+                    from: EdgeFrom::Viewer,
                     destination_ids: vec![10],
                 },
             ]]
@@ -841,8 +888,8 @@ mod tests {
             .retweet(1, 10, 5, Some(20))
             .tweet(2, 30)
             .tweet(5, 20);
-        let scenario =
-            executor(sources, SafetyLevel::TimelineHome, Some(VIEWER)).rpc(Rpc::EvaluateTweets);
+        let scenario = executor(sources, SafetyLevel::TimelineHome, Some(VIEWER))
+            .retweet_merge(RetweetMerge::Merged);
         scenario.hydrate(&[raw(1, None), raw(2, None)]).await;
         assert_eq!(
             scenario.sources().selects(),
@@ -992,7 +1039,7 @@ mod tests {
             let sources = scenario.sources();
             let hydrated = scenario.hydrate(&raw).await;
             assert_eq!(sources.keys(Source::TesPureCoreData), [vec![1, 2, 3]]);
-            assert_eq!(sources.keys(Source::TesTweet), [vec![1, 2, 3]]);
+            assert_eq!(sources.keys(Source::TesTweetForVisibility), [vec![1, 2, 3]]);
             let exclusive = (Some(30), viewer_id.is_some());
             assert_eq!(
                 hydrated
@@ -1000,7 +1047,7 @@ mod tests {
                     .iter()
                     .map(|c| (
                         c.post.tweet_features.exclusive_conversation_author_id,
-                        c.post.edges.contains(Hydrator::SuperFollowsExclusive)
+                        c.edges.contains(Hydrator::SuperFollowsExclusive)
                     ))
                     .collect::<Vec<_>>(),
                 [exclusive, exclusive, exclusive, (None, false)]
@@ -1047,13 +1094,83 @@ mod tests {
                 .candidates
                 .iter()
                 .map(|c| (
-                    c.post.edges.contains(Hydrator::SuperFollowsExclusive),
-                    c.post.edges.contains(Hydrator::SuperFollowsRoot)
+                    c.edges.contains(Hydrator::SuperFollowsExclusive),
+                    c.edges.contains(Hydrator::SuperFollowsRoot)
                 ))
                 .collect::<Vec<_>>(),
             [(true, false), (false, true)]
         );
         assert!(hydrated.failed_ids.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_root_select_claiming_the_exclusive_selects_key_runs_to_the_exclusive_selects_ceiling()
+     {
+        let ms = Duration::from_millis;
+        for (latency, ends_at, answered) in [(ms(500), ms(500), true), (ms(1500), ms(1000), false)]
+        {
+            let world = InMemorySources::default()
+                .tweet(1, 10)
+                .tweet(2, 20)
+                .authors(&[10, 20])
+                .tweet_features(1, exclusive_tweet())
+                .control(2, control(ConversationControlArm::Subscribers, 30, &[]))
+                .edge(Graph::SuperFollows, VIEWER, 30)
+                .fault(Source::TesTweetForVisibility, Fault::Delays(ms(1)))
+                .key_latency(Source::Flock, 30, latency);
+            let scenario = executor(world, SafetyLevel::TimelineHomeHydration, Some(VIEWER));
+            let sources = scenario.sources();
+            let started = tokio::time::Instant::now();
+            let hydrated = scenario.hydrate(&[raw(1, None), raw(2, None)]).await;
+            assert_eq!(started.elapsed(), ends_at, "{latency:?}");
+            let super_follows: Vec<Vec<Graph>> = sources
+                .selects()
+                .into_iter()
+                .filter(|queries| queries.iter().any(|q| q.graph == Graph::SuperFollows))
+                .map(|queries| queries.iter().map(|query| query.graph).collect())
+                .collect();
+            assert_eq!(
+                super_follows,
+                [vec![
+                    Graph::Follows,
+                    Graph::SuperFollows,
+                    Graph::Follows,
+                    Graph::Blocks
+                ]],
+                "only the root select asks: {latency:?}"
+            );
+            let [exclusive, root] = &hydrated.candidates[..] else {
+                panic!("two candidates");
+            };
+            assert_eq!(
+                (
+                    exclusive.edges.contains(Hydrator::SuperFollowsExclusive),
+                    exclusive.failed.contains(Hydrator::SuperFollowsExclusive),
+                    root.edges.contains(Hydrator::SuperFollowsRoot),
+                    root.failed.contains(Hydrator::SuperFollowsRoot),
+                ),
+                (answered, !answered, answered, !answered),
+                "{latency:?}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_root_select_claiming_no_super_follows_key_ends_at_its_own_ceiling() {
+        let world = InMemorySources::default()
+            .tweet(1, 10)
+            .authors(&[10])
+            .control(1, control(ConversationControlArm::Followers, 30, &[]))
+            .key_latency(Source::Flock, 30, Duration::from_millis(500));
+        let scenario = executor(world, SafetyLevel::TimelineHomeHydration, Some(VIEWER));
+        let started = tokio::time::Instant::now();
+        let hydrated = scenario.hydrate(&[raw(1, None)]).await;
+        assert_eq!(started.elapsed(), BEST_EFFORT_HYDRATION_TIMEOUT);
+        assert!(
+            hydrated.candidates[0]
+                .failed
+                .contains(Hydrator::ViewerFollowsRoot)
+        );
     }
 
     fn root_edges(sources: &InMemorySources) -> Vec<Vec<EdgeQuery>> {
@@ -1069,31 +1186,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_select_carries_both_root_edges_and_a_failure_fails_every_tweet_it_keyed() {
-        use ConversationControlArm::{ByInvitation, Community, MyNetwork, Subscribers};
+    async fn one_select_carries_every_root_edge_and_a_failure_fails_every_tweet_it_keyed() {
+        use ConversationControlArm::{ByInvitation, Community, Followers, MyNetwork, Subscribers};
         let world = || {
             InMemorySources::default()
                 .tweet(1, 10)
                 .tweet(2, 10)
                 .tweet(3, 10)
                 .tweet(4, 10)
+                .tweet(5, 10)
                 .authors(&[10])
                 .control(1, control(Community, 30, &[]))
                 .control(2, control(MyNetwork, 30, &[]))
                 .control(3, control(Subscribers, 40, &[]))
                 .control(4, control(ByInvitation, 40, &[]))
+                .control(5, control(Followers, 50, &[]))
                 .edge(Graph::Follows, 30, VIEWER)
                 .edge(Graph::SuperFollows, VIEWER, 40)
+                .edge(Graph::Follows, VIEWER, 50)
         };
-        let raw = [raw(1, None), raw(2, None), raw(3, None), raw(4, None)];
+        let raw = [
+            raw(1, None),
+            raw(2, None),
+            raw(3, None),
+            raw(4, None),
+            raw(5, None),
+        ];
         let facts = |hydrated: &InRequestOrder| {
             hydrated
                 .candidates
                 .iter()
                 .map(|c| {
                     (
-                        c.post.edges.contains(Hydrator::RootFollowsViewer),
-                        c.post.edges.contains(Hydrator::SuperFollowsRoot),
+                        c.edges.contains(Hydrator::RootFollowsViewer),
+                        c.edges.contains(Hydrator::SuperFollowsRoot),
+                        c.edges.contains(Hydrator::ViewerFollowsRoot),
                     )
                 })
                 .collect::<Vec<_>>()
@@ -1109,23 +1236,38 @@ mod tests {
                 EdgeQuery {
                     graph: Graph::Follows,
                     direction: EdgeDirection::Reverse,
+                    from: EdgeFrom::Viewer,
                     destination_ids: vec![30],
                 },
                 EdgeQuery {
                     graph: Graph::SuperFollows,
                     direction: EdgeDirection::Forward,
+                    from: EdgeFrom::Viewer,
                     destination_ids: vec![40],
+                },
+                EdgeQuery {
+                    graph: Graph::Follows,
+                    direction: EdgeDirection::Forward,
+                    from: EdgeFrom::Viewer,
+                    destination_ids: vec![50],
                 },
                 EdgeQuery {
                     graph: Graph::Blocks,
                     direction: EdgeDirection::Reverse,
-                    destination_ids: vec![30, 40],
+                    from: EdgeFrom::Viewer,
+                    destination_ids: vec![30, 40, 50],
                 },
             ]]
         );
         assert_eq!(
             facts(&hydrated),
-            [(true, false), (true, false), (false, true), (false, false)]
+            [
+                (true, false, false),
+                (true, false, false),
+                (false, true, false),
+                (false, false, false),
+                (false, false, true),
+            ]
         );
         assert!(hydrated.failed_ids.is_empty());
 
@@ -1133,15 +1275,15 @@ mod tests {
         let hydrated = executor(failed, SafetyLevel::TimelineHomeHydration, Some(VIEWER))
             .hydrate(&raw)
             .await;
-        assert_eq!(facts(&hydrated), [(false, false); 4]);
-        assert_eq!(hydrated.failed_ids, ids(&[1, 2, 3]));
+        assert_eq!(facts(&hydrated), [(false, false, false); 5]);
+        assert_eq!(hydrated.failed_ids, ids(&[1, 2, 3, 5]));
 
         let logged_out = world();
         let scenario = executor(logged_out, SafetyLevel::TimelineHomeHydration, None);
         let logged_out = scenario.sources();
         let hydrated = scenario.hydrate(&raw).await;
         assert!(root_edges(logged_out).is_empty());
-        assert_eq!(facts(&hydrated), [(false, false); 4]);
+        assert_eq!(facts(&hydrated), [(false, false, false); 5]);
         assert!(hydrated.failed_ids.is_empty());
     }
 
@@ -1157,11 +1299,8 @@ mod tests {
             .hydrate(&[raw(1, None)])
             .await;
         assert_eq!(
-            hydrated.candidates[0].viewer_relationship,
-            crate::models::ViewerRelationship {
-                follows: true,
-                ..Default::default()
-            }
+            hydrated.candidates[0].edges,
+            crate::models::EdgeSet::default().with(Hydrator::Follows)
         );
         assert!(hydrated.failed_ids.is_empty());
     }
@@ -1192,11 +1331,7 @@ mod tests {
             hydrated
                 .candidates
                 .iter()
-                .map(|c| {
-                    c.post
-                        .edges
-                        .contains(Hydrator::RootFollowsViewerSecondDegree)
-                })
+                .map(|c| c.edges.contains(Hydrator::RootFollowsViewerSecondDegree))
                 .collect::<Vec<_>>()
         };
         let level = SafetyLevel::TimelineHomeHydration;
@@ -1247,14 +1382,116 @@ mod tests {
                 .await;
             assert_eq!(
                 hydrated.candidates[0].failed,
-                Hydrators::of(Hydrator::SuperFollowsRoot).with(Hydrator::BlockedByConversationRoot),
+                Hydrators::of(Hydrator::SuperFollowsRoot),
                 "{delayed:?} lands last"
             );
             let engine = RuleEngine::for_tests();
-            let evaluation =
-                engine.evaluate(level, &hydrated.viewer_features, &hydrated.candidates[0]);
+            let evaluation = engine.evaluate(
+                level,
+                &hydrated.viewer_features,
+                &hydrated.candidates[0],
+                Placement::Standalone,
+            );
             assert!(matches!(evaluation, Evaluation::Complete { .. }));
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_the_blocked_by_node_a_post_reads_can_become_its_fail_open_default() {
+        use ConversationControlArm::Subscribers;
+        use Hydrator::BlockedByConversationRoot;
+        let level = SafetyLevel::TimelineHomeHydration;
+        let reply = |conversation_id, parent_id, parent_author_id| PureCoreData {
+            author_id: 10,
+            conversation_id: Some(conversation_id),
+            in_reply_to_tweet_id: Some(parent_id),
+            in_reply_to_user_id: Some(parent_author_id),
+            ..Default::default()
+        };
+        let control_fails =
+            || InMemorySources::default().fault(Source::TesConversationControl, Fault::Fails);
+        let rows = [
+            (
+                "a conversation root post whose conversation control call fails",
+                control_fails().tweet(1, 10),
+                &[1][..],
+                BlockedByConversationRoot,
+                false,
+            ),
+            (
+                "a conversation root post whose conversation root select claims its author and times out",
+                InMemorySources::default()
+                    .tweet(1, 10)
+                    .control(1, control(Subscribers, 10, &[]))
+                    .fault(
+                        Source::TesPureCoreData,
+                        Fault::Delays(BEST_EFFORT_HYDRATION_TIMEOUT / 2),
+                    )
+                    .hang_graph(Graph::SuperFollows),
+                &[1][..],
+                BlockedByConversationRoot,
+                false,
+            ),
+            (
+                "a direct reply whose conversation control call fails",
+                control_fails().pure_core(1, reply(100, 100, 30)),
+                &[1][..],
+                BlockedByConversationRoot,
+                false,
+            ),
+            (
+                "a nested reply whose conversation root author is in the batch and whose conversation control call fails",
+                control_fails().pure_core(1, reply(100, 2, 11)).pure_core(
+                    2,
+                    PureCoreData {
+                        author_id: 11,
+                        ..reply(100, 100, 30)
+                    },
+                ),
+                &[1, 2][..],
+                BlockedByConversationRoot,
+                false,
+            ),
+            (
+                "a nested reply whose conversation root is outside the batch and whose conversation control call fails",
+                control_fails().pure_core(1, reply(100, 200, 11)),
+                &[1][..],
+                BlockedByConversationRoot,
+                true,
+            ),
+        ];
+        let engine = RuleEngine::for_tests();
+        for (name, sources, batch, node, reports) in rows {
+            let hydrated = executor(sources.authors(&[10, 11, 30]), level, Some(VIEWER))
+                .hydrate(&batch.iter().map(|&id| raw(id, None)).collect::<Vec<_>>())
+                .await;
+            let evaluation = engine.evaluate(
+                level,
+                &hydrated.viewer_features,
+                &hydrated.candidates[0],
+                Placement::Standalone,
+            );
+            assert_eq!(
+                evaluation.fail_open_defaults().contains(node),
+                reports,
+                "{name}: {node:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_conversation_root_post_whose_author_blocks_the_viewer_reads_only_the_author_block() {
+        let sources = InMemorySources::default()
+            .tweet(1, 10)
+            .authors(&[10])
+            .control(1, control(ConversationControlArm::Community, 10, &[]))
+            .edge(Graph::Blocks, 10, VIEWER);
+        let hydrated = executor(sources, SafetyLevel::TimelineHomeHydration, Some(VIEWER))
+            .hydrate(&[raw(1, None)])
+            .await;
+        let candidate = &hydrated.candidates[0];
+        assert!(candidate.edges.contains(Hydrator::BlockedByAuthor));
+        assert!(!candidate.post.conversation_root_author_blocks_viewer);
     }
 
     #[tokio::test]
@@ -1287,10 +1524,14 @@ mod tests {
                 vec![EdgeQuery::reverse(Graph::Blocks, vec![40])],
             ]
         );
-        assert_eq!(sources.keys(Source::TesConversationRoot), [vec![200]]);
+        assert_eq!(sources.keys(Source::TesPureCoreData), [vec![1, 2, 3]]);
+        assert_eq!(
+            sources.keys((Relation::ConversationRoot, Source::TesPureCoreData)),
+            [vec![200]]
+        );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_failed_conversation_root_post_fails_only_the_nested_replies_under_it() {
         use Hydrator::{BlockedByConversationRootPost, ConversationRootPost};
         let nested = |author_id, conversation_id| PureCoreData {
@@ -1300,17 +1541,16 @@ mod tests {
             in_reply_to_user_id: Some(99),
             ..Default::default()
         };
-        let world = || {
+        let replies = || {
             InMemorySources::default()
                 .pure_core(1, nested(10, 100))
                 .tweet(2, 20)
                 .pure_core(3, nested(11, 300))
                 .pure_core(4, nested(12, 100))
-                .tweet(100, 30)
-                .tweet(300, 31)
                 .authors(&[10, 11, 12, 20])
                 .edge(Graph::Blocks, 30, VIEWER)
         };
+        let world = || replies().tweet(100, 30).tweet(300, 31);
         let author_select = vec![
             EdgeQuery::forward(Graph::Follows, vec![10, 11, 12, 20]),
             EdgeQuery::reverse(Graph::Blocks, vec![10, 11, 12, 20]),
@@ -1320,37 +1560,83 @@ mod tests {
         let complete: Result<Hydrators, Unresolved> = Ok(Hydrators::empty());
         let rows = [
             (
-                "root call fails",
-                world().fault(Source::TesConversationRoot, Fault::Fails),
+                "root call times out",
+                world().key_latency(
+                    (Relation::ConversationRoot, Source::TesPureCoreData),
+                    100,
+                    BEST_EFFORT_HYDRATION_TIMEOUT * 2,
+                ),
                 [root_failed, complete, root_failed, root_failed],
                 vec![author_select.clone()],
+                vec![("conversation_root_pure_core_data", "timeout", 3)],
             ),
             (
                 "one root key fails",
-                world().fail_key(Source::TesConversationRoot, 100),
+                world().fail_key((Relation::ConversationRoot, Source::TesPureCoreData), 100),
                 [root_failed, complete, complete, root_failed],
                 vec![
-                    author_select,
+                    author_select.clone(),
                     vec![EdgeQuery::reverse(Graph::Blocks, vec![31])],
                 ],
+                vec![
+                    ("conversation_root_author_blocked_by", "success", 1),
+                    ("conversation_root_pure_core_data", "error", 2),
+                    ("conversation_root_pure_core_data", "success", 1),
+                ],
+            ),
+            (
+                "no root is found",
+                replies(),
+                [complete; 4],
+                vec![author_select],
+                vec![("conversation_root_pure_core_data", "success", 3)],
             ),
         ];
         let raw = [raw(1, None), raw(2, None), raw(3, None), raw(4, None)];
         let level = SafetyLevel::TimelineHomeHydration;
-        for (name, sources, failed, selects) in rows {
-            let scenario = executor(sources, level, Some(VIEWER));
+        for (name, sources, failed, selects, tweet_ids) in rows {
+            let (metrics, recording) = Metrics::recording();
+            let scenario = executor(sources, level, Some(VIEWER)).metrics(metrics);
             let sources = scenario.sources();
             let hydrated = scenario.hydrate(&raw).await;
+            let mut recorded: Vec<(String, String, usize)> = recording
+                .take(&HYDRATOR_TWEET_IDS.family)
+                .iter()
+                .filter(|sample| {
+                    matches!(
+                        sample.label("call"),
+                        Some(
+                            "conversation_root_pure_core_data"
+                                | "conversation_root_author_blocked_by"
+                        )
+                    )
+                })
+                .map(|sample| {
+                    let label = |name| sample.label(name).unwrap_or_default().to_owned();
+                    (label("call"), label("result"), sample.value as usize)
+                })
+                .collect();
+            recorded.sort();
+            let tweet_ids: Vec<(String, String, usize)> = tweet_ids
+                .into_iter()
+                .map(|(call, result, count)| (call.to_owned(), result.to_owned(), count))
+                .collect();
+            assert_eq!(recorded, tweet_ids, "{name}");
             assert_eq!(hydrated.failed_nodes, failed, "{name}");
             assert!(
                 hydrated
                     .candidates
                     .iter()
-                    .all(|c| !c.post.edges.contains(BlockedByConversationRootPost)),
+                    .all(|c| !c.post.conversation_root_author_blocks_viewer),
                 "{name}"
             );
             assert_eq!(
-                sources.keys(Source::TesConversationRoot),
+                sources.keys(Source::TesPureCoreData),
+                [vec![1, 2, 3, 4]],
+                "{name}"
+            );
+            assert_eq!(
+                sources.keys((Relation::ConversationRoot, Source::TesPureCoreData)),
                 [vec![100, 300]],
                 "{name}"
             );
@@ -1521,6 +1807,474 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_reaction_post_asks_its_own_calls_for_its_reacted_to_posts_labels_and_authors_safety()
+    {
+        let sources = InMemorySources::default()
+            .tweet(1, 10)
+            .tweet_features(1, reaction_to(7, 70))
+            .tweet(2, 20)
+            .tweet_features(2, reaction_to(1, 20))
+            .tweet(3, 30)
+            .labels(7, label_map(SafetyLabelType::NSFW_HIGH_PRECISION))
+            .authors(&[10, 20, 30])
+            .user(70, protected_user(70));
+        let requested = [raw(1, None), raw(2, None), raw(3, None)];
+        let scenario = executor(sources, SafetyLevel::TimelineHomeHydration, Some(VIEWER));
+        let sources = scenario.sources();
+        let hydrated = scenario.hydrate(&requested).await;
+        for (fetcher, asked) in [
+            (Source::SafetyLabels.into(), vec![1, 2, 3]),
+            (
+                FetcherId::from((Relation::ReactedTo, Source::SafetyLabels)),
+                vec![1, 7],
+            ),
+            (Source::GizmoduckAuthor.into(), vec![10, 20, 30]),
+            (
+                (Relation::ReactedTo, Source::GizmoduckAuthor).into(),
+                vec![20, 70],
+            ),
+        ] {
+            let mut keys: Vec<u64> = sources.keys(fetcher).concat();
+            keys.sort_unstable();
+            assert_eq!(keys, asked, "{fetcher:?}");
+        }
+        assert_eq!(
+            hydrated
+                .candidates
+                .iter()
+                .map(|c| (
+                    c.post
+                        .reacted_to_post_safety_labels
+                        .has_label(SafetyLabelType::NSFW_HIGH_PRECISION),
+                    c.post.reacted_to_author_is_protected,
+                ))
+                .collect::<Vec<_>>(),
+            [(true, true), (false, false), (false, false)]
+        );
+        assert!(hydrated.failed_ids.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_batch_without_a_reaction_post_sends_no_reacted_to_call() {
+        let plain = executor(
+            InMemorySources::default().tweet(3, 30).authors(&[30]),
+            SafetyLevel::TimelineHomeHydration,
+            Some(VIEWER),
+        );
+        plain.hydrate(&[raw(3, None)]).await;
+        assert_eq!(plain.sources().keys(Source::SafetyLabels), [vec![3]]);
+        assert_eq!(plain.sources().keys(Source::GizmoduckAuthor), [vec![30]]);
+        for source in [
+            (Relation::ReactedTo, Source::SafetyLabels),
+            (Relation::ReactedTo, Source::GizmoduckAuthor),
+        ] {
+            assert!(plain.sources().keys(source).is_empty(), "{source:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_or_missing_reacted_to_lookup_shows_its_reaction_post_unrestricted() {
+        use crate::rules::fixtures::allow;
+        use Hydrator::{ReactedToAuthorSafety, ReactedToPostSafetyLabels};
+        let world = || {
+            InMemorySources::default()
+                .tweet(1, 10)
+                .tweet_features(1, reaction_to(7, 70))
+                .tweet(2, 20)
+                .authors(&[10, 20])
+        };
+        let shown = |fail_open_defaults| Evaluation::Complete {
+            verdict: allow(),
+            fail_open_defaults,
+        };
+        let rows = [
+            (
+                "reacted-to post's labels fail",
+                world()
+                    .labels(7, label_map(SafetyLabelType::NSFW_HIGH_PRECISION))
+                    .fail_key((Relation::ReactedTo, Source::SafetyLabels), 7),
+                Hydrators::of(ReactedToPostSafetyLabels),
+            ),
+            (
+                "reacted-to author fails",
+                world()
+                    .user(70, protected_user(70))
+                    .fail_key((Relation::ReactedTo, Source::GizmoduckAuthor), 70),
+                Hydrators::of(ReactedToAuthorSafety),
+            ),
+            (
+                "reacted-to post and author not found",
+                world(),
+                Hydrators::empty(),
+            ),
+        ];
+        let raw = [raw(1, None), raw(2, None)];
+        for (name, sources, failed) in rows {
+            let evaluations = executor(sources, SafetyLevel::TimelineHomeHydration, Some(VIEWER))
+                .retweet_merge(RetweetMerge::Merged)
+                .evaluate(&raw)
+                .await
+                .evaluations();
+            assert_eq!(
+                evaluations,
+                [shown(failed), shown(Hydrators::empty())],
+                "{name}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_reaction_posts_reacted_to_lookups_decide_it_when_its_pure_core_lands_last() {
+        use crate::rules::fixtures::{blurred, dropped};
+        use xai_visibility_filtering::models::FilteredReason;
+        use xai_x_thrift::action::InterstitialReason;
+        let world = || {
+            InMemorySources::default()
+                .tweet(1, 10)
+                .tweet_features(1, reaction_to(7, 70))
+                .key_latency(
+                    Source::TesPureCoreData,
+                    1,
+                    BEST_EFFORT_HYDRATION_TIMEOUT / 10,
+                )
+                .authors(&[10, 70])
+        };
+        let rows = [
+            (
+                "reacted-to author protected",
+                world().user(70, protected_user(70)),
+                Evaluation::complete(dropped(
+                    FilteredReason::AuthorIsProtected,
+                    "protected_original_author/drop",
+                )),
+            ),
+            (
+                "reacted-to post labelled nsfw high precision",
+                world().labels(7, label_map(SafetyLabelType::NSFW_HIGH_PRECISION)),
+                Evaluation::complete(blurred(
+                    InterstitialReason::Sensitive(true),
+                    "original_tweet_adult_media_propagation/blur/sensitive",
+                )),
+            ),
+            (
+                "reacted-to post labelled gore high precision",
+                world().labels(
+                    7,
+                    label_map(SafetyLabelType::GORE_AND_VIOLENCE_HIGH_PRECISION),
+                ),
+                Evaluation::complete(blurred(
+                    InterstitialReason::Violence(true),
+                    "original_tweet_gore_media_propagation/blur/violence",
+                )),
+            ),
+        ];
+        for (name, sources, expected) in rows {
+            let scenario = executor(sources, SafetyLevel::TimelineHomeHydration, Some(VIEWER))
+                .retweet_merge(RetweetMerge::Merged);
+            let evaluations = scenario.evaluate(&[raw(1, None)]).await.evaluations();
+            assert_eq!(evaluations, [expected], "{name}");
+            let sources = scenario.sources();
+            assert_eq!(
+                sources.keys((Relation::ReactedTo, Source::SafetyLabels)),
+                [vec![7]],
+                "{name}"
+            );
+            assert_eq!(
+                sources.keys((Relation::ReactedTo, Source::GizmoduckAuthor)),
+                [vec![70]],
+                "{name}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_partial_slow_or_hung_reacted_to_lookup_leaves_the_requests_lookups_of_its_keys_complete()
+     {
+        use crate::rules::fixtures::allow;
+        use Hydrator::{ReactedToAuthorSafety, ReactedToPostSafetyLabels};
+        fn world() -> InMemorySources {
+            InMemorySources::default()
+                .tweet(1, 10)
+                .tweet_features(1, reaction_to(7, 20))
+                .key_latency(
+                    Source::TesPureCoreData,
+                    1,
+                    BEST_EFFORT_HYDRATION_TIMEOUT / 10,
+                )
+                .authors(&[10, 20, 30])
+        }
+        type World = fn() -> InMemorySources;
+        type Broken = fn(InMemorySources) -> InMemorySources;
+        let worlds: [(&str, World); 3] = [
+            ("reacted-to author also writes a requested post", || {
+                world().tweet(2, 20)
+            }),
+            (
+                "reacted-to author also writes a retweet's source the share names no author for",
+                || world().retweet(2, 30, 5, None).tweet(5, 20),
+            ),
+            ("reacted-to post is also a retweet's source", || {
+                world().retweet(2, 30, 7, Some(20)).tweet(7, 20)
+            }),
+        ];
+        let both = Hydrators::of(ReactedToPostSafetyLabels).with(ReactedToAuthorSafety);
+        let faults: [(&str, Broken, Hydrators); 4] = [
+            (
+                "fails",
+                |sources| {
+                    sources
+                        .fail_key((Relation::ReactedTo, Source::SafetyLabels), 7)
+                        .fail_key((Relation::ReactedTo, Source::GizmoduckAuthor), 20)
+                },
+                both,
+            ),
+            (
+                "outlasts its ceiling",
+                |sources| {
+                    let slow = BEST_EFFORT_HYDRATION_TIMEOUT * 2;
+                    sources
+                        .key_latency((Relation::ReactedTo, Source::SafetyLabels), 7, slow)
+                        .key_latency((Relation::ReactedTo, Source::GizmoduckAuthor), 20, slow)
+                },
+                both,
+            ),
+            (
+                "hangs",
+                |sources| {
+                    sources
+                        .fault((Relation::ReactedTo, Source::SafetyLabels), Fault::Hangs)
+                        .fault((Relation::ReactedTo, Source::GizmoduckAuthor), Fault::Hangs)
+                },
+                both,
+            ),
+            (
+                "answers partial",
+                |sources| {
+                    sources.fault(
+                        (Relation::ReactedTo, Source::GizmoduckAuthor),
+                        Fault::AnswersPartial,
+                    )
+                },
+                Hydrators::of(ReactedToAuthorSafety),
+            ),
+        ];
+        let requested = [raw(1, None), raw(2, None)];
+        for (world, sources) in worlds {
+            for (fault, broken, fail_open_defaults) in faults {
+                let reaction = Evaluation::Complete {
+                    verdict: allow(),
+                    fail_open_defaults,
+                };
+                let scenario = executor(
+                    broken(sources()),
+                    SafetyLevel::TimelineHomeHydration,
+                    Some(VIEWER),
+                )
+                .retweet_merge(RetweetMerge::Merged);
+                let evaluations = scenario.evaluate(&requested).await.evaluations();
+                assert_eq!(
+                    evaluations,
+                    [reaction, Evaluation::complete(allow())],
+                    "{world}, the reacted-to lookup {fault}"
+                );
+                let hydrated = scenario.hydrate(&requested).await;
+                assert_eq!(
+                    hydrated.failed_nodes,
+                    [Ok(fail_open_defaults), Ok(Hydrators::empty())],
+                    "{world}, the reacted-to lookup {fault}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reacted_to_author_lookup_neither_reads_nor_writes_the_author_fallback_cache() {
+        let sources = InMemorySources::default()
+            .tweet(1, 70)
+            .tweet(2, 10)
+            .tweet_features(2, reaction_to(7, 70))
+            .tweet(3, 10)
+            .tweet_features(3, reaction_to(8, 71))
+            .tweet(4, 71)
+            .authors(&[10])
+            .user(70, protected_user(70))
+            .user(71, protected_user(71));
+        let caches = FallbackCaches {
+            tweets: None,
+            authors: Some(fallback_cache(8)),
+        };
+        let scenario = executor(sources, SafetyLevel::TimelineHomeHydration, Some(VIEWER))
+            .retweet_merge(RetweetMerge::Merged)
+            .fallback_caches(caches);
+        let first = scenario.hydrate(&[raw(1, None), raw(3, None)]).await;
+        assert!(first.candidates[1].post.reacted_to_author_is_protected);
+
+        let sources = scenario.sources();
+        sources.break_source(Source::GizmoduckAuthor, Fault::Fails);
+        sources.break_source((Relation::ReactedTo, Source::GizmoduckAuthor), Fault::Fails);
+        let second = scenario
+            .hydrate(&[raw(1, None), raw(2, None), raw(4, None)])
+            .await;
+        assert!(second.candidates[0].author.features.is_protected);
+        assert!(!second.candidates[1].post.reacted_to_author_is_protected);
+        assert_eq!(
+            second.failed_nodes,
+            [
+                Ok(Hydrators::empty()),
+                Ok(Hydrators::of(Hydrator::ReactedToAuthorSafety)),
+                Err(Unresolved {
+                    lookup: Lookup::Author,
+                    cause: Cause::Failed,
+                }),
+            ]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_conversation_root_that_is_also_a_retweet_source_is_fetched_by_both_calls() {
+        use crate::rules::fixtures::allow;
+        let world_naming = |source_author| {
+            InMemorySources::default()
+                .pure_core(
+                    1,
+                    PureCoreData {
+                        author_id: 10,
+                        conversation_id: Some(100),
+                        in_reply_to_tweet_id: Some(101),
+                        in_reply_to_user_id: Some(99),
+                        ..Default::default()
+                    },
+                )
+                .retweet(2, 20, 100, source_author)
+                .tweet(100, 30)
+                .authors(&[10, 20, 30])
+        };
+        let world = || world_naming(Some(30));
+        let root_failed = Evaluation::Complete {
+            verdict: allow(),
+            fail_open_defaults: Hydrators::of(Hydrator::BlockedByConversationRootPost),
+        };
+        let complete = Evaluation::complete(allow());
+        let slow = BEST_EFFORT_HYDRATION_TIMEOUT * 2;
+        let rows = [
+            ("both answer", world(), [complete.clone(), complete.clone()]),
+            (
+                "the root call fails",
+                world().fail_key((Relation::ConversationRoot, Source::TesPureCoreData), 100),
+                [root_failed.clone(), complete.clone()],
+            ),
+            (
+                "the root call times out",
+                world().key_latency(
+                    (Relation::ConversationRoot, Source::TesPureCoreData),
+                    100,
+                    slow,
+                ),
+                [root_failed.clone(), complete.clone()],
+            ),
+            (
+                "the retweet-source call fails",
+                world().fail_key(Source::TesPureCoreData, 100),
+                [complete.clone(), Evaluation::Failed(Lookup::SharedTweet)],
+            ),
+            (
+                "the root's blocked-by select claims an unauthored source's author and times out",
+                world_naming(None)
+                    .key_latency(
+                        Source::TesPureCoreData,
+                        100,
+                        BEST_EFFORT_HYDRATION_TIMEOUT / 2,
+                    )
+                    .key_latency(Source::Flock, 30, HYDRATION_TIMEOUT / 2),
+                [
+                    root_failed.clone(),
+                    Evaluation::Complete {
+                        verdict: allow(),
+                        fail_open_defaults: Hydrators::of(Hydrator::BlockedByAuthor),
+                    },
+                ],
+            ),
+        ];
+        for (name, sources, expected) in rows {
+            let (metrics, recording) = Metrics::recording();
+            let scenario = executor(sources, SafetyLevel::TimelineHomeHydration, Some(VIEWER))
+                .retweet_merge(RetweetMerge::Merged)
+                .metrics(metrics);
+            let evaluations = scenario
+                .evaluate(&[raw(1, None), raw(2, None)])
+                .await
+                .evaluations();
+            let calls: BTreeSet<String> = recording
+                .take(&HYDRATOR_TWEET_IDS.family)
+                .iter()
+                .filter(|sample| sample.label("backend") == Some("tes"))
+                .filter_map(|sample| Some(sample.label("call")?.to_owned()))
+                .filter(|call| call.ends_with("pure_core_data"))
+                .collect();
+            assert_eq!(
+                calls,
+                BTreeSet::from([
+                    "conversation_root_pure_core_data".to_owned(),
+                    "tweet_pure_core_data".to_owned()
+                ]),
+                "{name}"
+            );
+            let sources = scenario.sources();
+            assert_eq!(
+                sources.keys(Source::TesPureCoreData),
+                [vec![1, 2], vec![100]],
+                "{name}"
+            );
+            assert_eq!(
+                sources.keys((Relation::ConversationRoot, Source::TesPureCoreData)),
+                [vec![100]],
+                "{name}"
+            );
+            assert_eq!(evaluations, expected, "{name}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_conversation_root_lookup_reads_and_writes_the_tweet_fallback_cache() {
+        let nested = |author_id, conversation_id| PureCoreData {
+            author_id,
+            conversation_id: Some(conversation_id),
+            in_reply_to_tweet_id: Some(conversation_id + 1),
+            in_reply_to_user_id: Some(99),
+            ..Default::default()
+        };
+        let sources = InMemorySources::default()
+            .pure_core(1, nested(10, 100))
+            .pure_core(2, nested(11, 200))
+            .tweet(100, 30)
+            .tweet(200, 40)
+            .authors(&[10, 11, 30, 40]);
+        let caches = FallbackCaches {
+            tweets: Some(tweet_fallback_cache(8)),
+            authors: None,
+        };
+        let scenario = executor(sources, SafetyLevel::TimelineHomeHydration, Some(VIEWER))
+            .fallback_caches(caches);
+        let first = scenario
+            .hydrate(&[raw(1, None), raw(2, None), raw(200, None)])
+            .await;
+        assert_eq!(first.failed_nodes, [Ok(Hydrators::empty()); 3]);
+
+        let sources = scenario.sources();
+        sources.break_source(Source::TesPureCoreData, Fault::Fails);
+        sources.break_source(
+            (Relation::ConversationRoot, Source::TesPureCoreData),
+            Fault::Fails,
+        );
+        let second = scenario.hydrate(&[raw(100, None), raw(2, None)]).await;
+        assert_eq!(second.failed_nodes, [Ok(Hydrators::empty()); 2]);
+        assert_eq!(
+            sources.keys((Relation::ConversationRoot, Source::TesPureCoreData)),
+            [vec![100], vec![200]]
+        );
+    }
+
+    #[tokio::test]
     async fn authors_share_one_key_and_a_missing_user_is_complete() {
         let sources = InMemorySources::default().tweet(1, 10).tweet(2, 10);
         let raw = [raw(1, None), raw(2, None)];
@@ -1528,7 +2282,12 @@ mod tests {
         let sources = scenario.sources();
         let hydrated = scenario.hydrate(&raw).await;
         assert_eq!(sources.keys(Source::GizmoduckAuthor), [vec![10]]);
-        assert!(hydrated.candidates.iter().all(|c| !c.author.is_suspended));
+        assert!(
+            hydrated
+                .candidates
+                .iter()
+                .all(|c| !c.author.features.is_suspended)
+        );
         assert!(hydrated.failed_ids.is_empty());
     }
 
@@ -1545,12 +2304,63 @@ mod tests {
             hydrated
                 .candidates
                 .iter()
-                .map(|c| (c.author.id, c.author.is_suspended))
+                .map(|c| (c.author.id, c.author.features.is_suspended))
                 .collect::<Vec<_>>(),
             [(10, true); 3]
         );
         assert!(hydrated.failed_ids.is_empty());
         assert!(hydrated.unresolved.is_empty());
+    }
+
+    #[tokio::test]
+    async fn user_rows_ask_the_actor_source_by_user_without_pure_core_and_ask_a_repeated_user_once()
+    {
+        use crate::hydration::{HydratedUser, RequestRows};
+        let sources = InMemorySources::default()
+            .user(10, suspended())
+            .authors(&[20])
+            .edge(Graph::Blocks, VIEWER, 20)
+            .fail_key(Source::GizmoduckActor, 30);
+        let plan = HydrationPlan::with_rows(
+            SafetyLevel::QuotedTweetRules,
+            RequestRows::Users,
+            Hydrators::of(Hydrator::AuthorSafety).with(Hydrator::Blocks),
+        );
+        let caches = FallbackCaches {
+            tweets: None,
+            authors: None,
+        };
+        let users = [10, 20, 10, 30].map(AuthorId).to_vec();
+        let hydration = plan
+            .hydrate(
+                &sources,
+                HydrationRequest::for_users(
+                    VIEWER,
+                    users,
+                    &caches,
+                    &Metrics::none().request(
+                        Endpoint::EvaluateTweets,
+                        RequestLevel::Named(SafetyLevel::QuotedTweetRules),
+                    ),
+                ),
+            )
+            .await;
+        assert_eq!(call_labels(&sources), ["Flock blocks", "GizmoduckActor"]);
+        assert_eq!(sources.keys(Source::GizmoduckActor), [vec![10, 20, 30]]);
+        assert!(matches!(
+            hydration.user(AuthorId(10)),
+            Some(HydratedUser::Resolved { user, edges, failed })
+                if user.features.is_suspended && !edges.contains(Hydrator::Blocks) && failed.is_empty()
+        ));
+        assert!(matches!(
+            hydration.user(AuthorId(20)),
+            Some(HydratedUser::Resolved { edges, failed, .. })
+                if edges.contains(Hydrator::Blocks) && failed.is_empty()
+        ));
+        assert!(matches!(
+            hydration.user(AuthorId(30)),
+            Some(HydratedUser::Unresolved(Cause::Failed))
+        ));
     }
 
     #[tokio::test]
@@ -1566,11 +2376,11 @@ mod tests {
         let scenario = executor(sources, SafetyLevel::TimelineHome, None).fallback_caches(caches);
         let sources = scenario.sources();
         let first = scenario.hydrate(&raw).await;
-        assert!(first.candidates[0].author.is_suspended);
+        assert!(first.candidates[0].author.features.is_suspended);
 
         sources.break_source(Source::GizmoduckAuthor, Fault::Fails);
         let second = scenario.hydrate(&raw).await;
-        assert!(second.candidates[0].author.is_suspended);
+        assert!(second.candidates[0].author.features.is_suspended);
         assert!(second.failed_ids.is_empty());
     }
 
@@ -1653,43 +2463,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_first_call_sent_after_sources_join_records_the_requests_own_batch_size() {
-        use crate::models::AuthorId;
-        let engine = RuleEngine::for_tests();
-        let plan = engine.plan(SafetyLevel::TimelineHomeHydration);
-        let raw = [raw(1, None)];
-        let mut store = Store::new(plan, Some(VIEWER), ClientCapability::default(), &raw, true);
-        let call = store.offer(plan.groups().next().unwrap()).unwrap();
-        let retweet = PureCore {
-            author_id: AuthorId(10),
-            source_tweet_id: Some(TweetId(5)),
-            source_author_id: Some(AuthorId(20)),
-            reply_to: None,
-        };
-        let cores =
-            HydrationBatch::from_results([1], HashMap::from([(1, Ok::<_, ()>(Some(retweet)))]));
-        assert_eq!(
-            store.land(&call, Reply::PureCores(cores), std::time::Duration::ZERO),
-            Landing::SourcesJoined
-        );
-        for source in [Source::SafetyLabels, Source::Flock] {
-            let group = plan.groups().find(|group| group.source == source).unwrap();
-            let call = store.offer(group).unwrap();
-            assert_eq!(
-                (call.is_first, call.batch_size),
-                (true, Some(1)),
-                "{source:?}"
-            );
-        }
-    }
-
     fn call_labels(sources: &InMemorySources) -> Vec<String> {
         let mut labels: Vec<String> = sources
-            .calls()
+            .fetcher_calls()
             .into_iter()
-            .filter(|source| *source != Source::Flock)
-            .map(|source| format!("{source:?}"))
+            .filter(|fetcher| fetcher.source != Source::Flock)
+            .map(|fetcher| format!("{fetcher:?}"))
             .chain(sources.selects().into_iter().map(|queries| {
                 let graphs: Vec<&str> = queries.iter().map(|q| <&str>::from(q.graph)).collect();
                 format!("Flock {}", graphs.join(","))
@@ -1740,7 +2519,8 @@ mod tests {
                 },
             )
             .tweet(400, 41)
-            .authors(&[10, 20])
+            .tweet_features(2, reaction_to(200, 42))
+            .authors(&[10, 20, 42])
     }
 
     #[tokio::test(start_paused = true)]
@@ -1761,10 +2541,9 @@ mod tests {
                 plan.groups().count(),
                 "{level:?}: {every_call:?}"
             );
-            let planned = Source::VARIANTS
-                .iter()
-                .filter(|&&source| plan.groups().any(|group| group.source == source));
-            for &hung in planned {
+            let planned = FetcherId::all()
+                .filter(|&source| plan.groups().any(|group| group.fetcher == source));
+            for hung in planned {
                 let sources = every_source_world().fault(hung, Fault::Hangs);
                 let started = tokio::time::Instant::now();
                 let scenario = executor(sources, level, Some(VIEWER));
@@ -1774,124 +2553,28 @@ mod tests {
                 let early =
                     tokio::time::timeout(BEST_EFFORT_HYDRATION_TIMEOUT / 2, &mut hydration).await;
                 assert!(early.is_err(), "{level:?} {hung:?}");
-                let sent = call_labels(sources);
-                let waiting: Vec<&str> = every_call
-                    .iter()
-                    .filter(|call| !sent.contains(call))
-                    .map(String::as_str)
-                    .collect();
-                let expected: Vec<String> = every_call
-                    .iter()
-                    .filter(|call| sent.contains(call))
-                    .cloned()
-                    .collect();
-                assert_eq!(sent, expected, "{level:?} {hung:?}");
-                let hydrated = hydration.await;
-                let ceiling = plan
-                    .groups()
-                    .filter(|group| group.source == hung)
-                    .map(|group| group.ceiling())
-                    .max();
-                assert_eq!(Some(started.elapsed()), ceiling, "{level:?} {hung:?}");
-                if hung == Source::TesConversationRoot {
-                    let root_failed = Hydrators::of(Hydrator::ConversationRootPost)
-                        .with(Hydrator::BlockedByConversationRootPost);
-                    assert_eq!(
-                        hydrated.failed_nodes,
-                        [
-                            Ok(Hydrators::empty()),
-                            Ok(Hydrators::empty()),
-                            Ok(Hydrators::empty()),
-                            Ok(root_failed),
-                        ]
-                    );
+                let mut waiting = every_call.clone();
+                for call in call_labels(sources) {
+                    let planned = waiting.iter().position(|planned| *planned == call);
+                    let planned = planned
+                        .unwrap_or_else(|| panic!("{level:?} {hung:?} sent unplanned {call}"));
+                    waiting.remove(planned);
                 }
+                hydration.await;
+                let ends = started.elapsed();
                 let waiting = if waiting.is_empty() {
                     "nothing".to_owned()
                 } else {
                     waiting.join("; ")
                 };
-                writeln!(rendered, "{level:?} {hung:?} waits: {waiting}").unwrap();
-            }
-        }
-        crate::hydration::assert_blessed(
-            "hung_source_waits.txt",
-            include_str!("../../tests/fixtures/hung_source_waits.txt"),
-            &rendered,
-        );
-    }
-
-    thread_local! {
-        static BATCH_SIZES: RefCell<Option<Vec<(String, usize)>>> = const { RefCell::new(None) };
-    }
-
-            struct ThreadBatchSizes;
-
-    impl StatsReceiverExt for ThreadBatchSizes {
-        fn incr(&self, _: &str, _: &[(&str, &str)], _: u64) {}
-        fn observe(&self, name: &str, scopes: &[(&str, &str)], value: f64, _: HistogramBuckets) {
-            if name != "vf_hydrator_batch_size" {
-                return;
-            }
-            let client = scopes.iter().find(|&&(label, _)| label == "client");
-            let client = client.map_or("", |&(_, client)| client).to_owned();
-            BATCH_SIZES.with_borrow_mut(|sizes| {
-                if let Some(sizes) = sizes {
-                    sizes.push((client, value as usize));
-                }
-            });
-        }
-        fn observe_expo(&self, _: &str, _: &[(&str, &str)], _: f64) {}
-        fn observe_vm(&self, _: &str, _: &[(&str, &str)], _: f64) {}
-        fn gauge(&self, _: &str, _: &[(&str, &str)], _: f64) {}
-    }
-
-    #[tokio::test]
-    async fn each_planned_client_records_its_batch_sizes() {
-        use SafetyLevel::{TimelineHome, TimelineHomeHydration};
-        xai_stats_receiver::init_stats_receiver_with(Arc::new(ThreadBatchSizes));
-        let raw = [
-            raw(1, None),
-            raw(2, None),
-            raw(3, None),
-            raw(4, None),
-            raw(1, None),
-        ];
-        let engine = RuleEngine::for_tests();
-        let mut rendered = String::new();
-        for level in [TimelineHome, TimelineHomeHydration] {
-            BATCH_SIZES.set(Some(Vec::new()));
-            executor(every_source_world(), level, Some(VIEWER))
-                .hydrate(&raw)
-                .await;
-            let recorded = BATCH_SIZES.take().unwrap();
-            let mut sources_by_client: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-            for group in engine.plan(level).groups() {
-                let (client, _) = group.label();
-                let source = format!("{:?}", group.source);
-                sources_by_client.entry(client).or_default().insert(source);
-            }
-            for (client, sources) in sources_by_client {
-                let mut sizes: Vec<usize> = recorded
-                    .iter()
-                    .filter(|(recorded_client, _)| *recorded_client == client)
-                    .map(|&(_, size)| size)
-                    .collect();
-                sizes.sort();
-                let sources: Vec<String> = sources.into_iter().collect();
                 writeln!(
                     rendered,
-                    "{level:?} {client} ({}): {sizes:?}",
-                    sources.join(", ")
+                    "{level:?} {hung:?} ends: {ends:?} waits: {waiting}"
                 )
                 .unwrap();
             }
         }
-        crate::hydration::assert_blessed(
-            "batch_sizes.txt",
-            include_str!("../../tests/fixtures/batch_sizes.txt"),
-            &rendered,
-        );
+        crate::pinned::assert_pinned("tests/fixtures/hung_source_waits.txt", &rendered);
     }
 
     const HIDDEN: CommunityModeration = CommunityModeration {

@@ -2,9 +2,11 @@ use super::article::{ArticleCoverMedia, ArticleMediaEntities};
 use super::post::{PostFacts, ReplyControl};
 use super::tweet::Tweet;
 use super::viewer::{ViewerAccount, ViewerCountry, ViewerLabels};
-use super::{EdgeFeature, In};
-use crate::hydration::Hydrator;
+use super::{EdgeFeature, Feature, In, Reads};
+use crate::hydration::{Hydrator, Hydrators};
 use crate::models::region::allows_country;
+use crate::models::PostCandidate;
+use crate::rules::context::At;
 use crate::rules::rule_spec::inputs::Interpreter;
 use crate::rules::rule_spec::rule::RuleCond;
 use crate::rules::rule_spec::Predicate;
@@ -12,9 +14,20 @@ use crate::rules::rule_spec::Predicate;
 type SuperFollowsExclusive = EdgeFeature<{ Hydrator::SuperFollowsExclusive as u8 }>;
 type RootFollowsViewer = EdgeFeature<{ Hydrator::RootFollowsViewer as u8 }>;
 type RootFollowsViewerSecondDegree = EdgeFeature<{ Hydrator::RootFollowsViewerSecondDegree as u8 }>;
-type BlockedByReplyRoot = EdgeFeature<{ Hydrator::BlockedByReplyRoot as u8 }>;
-type BlockedByConversationRoot = EdgeFeature<{ Hydrator::BlockedByConversationRoot as u8 }>;
-type BlockedByConversationRootPost = EdgeFeature<{ Hydrator::BlockedByConversationRootPost as u8 }>;
+
+enum ConversationRootAuthorBlocksViewer {}
+
+impl Feature for ConversationRootAuthorBlocksViewer {
+    const REQUIRED: Hydrators = Hydrators::BLOCKED_BY_CONVERSATION_ROOT_AUTHOR;
+    type Value<'a> = bool;
+}
+
+impl Reads<PostCandidate> for ConversationRootAuthorBlocksViewer {
+    #[inline]
+    fn read<'a>(at: At<'_, 'a>) -> bool {
+        at.post().conversation_root_author_blocks_viewer
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
@@ -57,14 +70,9 @@ impl CompoundLeaf {
                     first || second
                 },
             ),
-            Self::ViewerIsBlockedByConversationRootAuthor => i.run(
-                |(
-                    In::<PostFacts>(post),
-                    In::<BlockedByReplyRoot>(direct),
-                    In::<BlockedByConversationRoot>(from_control),
-                    In::<BlockedByConversationRootPost>(fetched),
-                )| { direct || fetched || (from_control && post.is_reply()) },
-            ),
+            Self::ViewerIsBlockedByConversationRootAuthor => {
+                i.run(|In::<ConversationRootAuthorBlocksViewer>(blocked)| blocked)
+            }
             Self::ViewerIsInAllowedCountry => i.run(
                 |(In::<ReplyControl>(control), In::<ViewerCountry>(country))| {
                     control.zip(country).is_some_and(|(control, country)| {

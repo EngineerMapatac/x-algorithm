@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 import urllib.parse
-from functools import partial
+from functools import cached_property, partial
 from threading import Event
 from typing import Any, Iterator, Mapping, Optional, cast
 
@@ -48,11 +48,19 @@ from xrex.data.recsys.feature_config import (
     REQUIRED_COLUMNS,
 )
 from xrex.data.recsys.recsys_batch import (
+    ADS_COUNT_COLUMNS,
     EMBEDDING_CONFIG,
+    HISTORY_URL_ID_COLUMN,
+    USER_ADS_COUNT_COLUMNS,
     CandidateNegativeMode,
     EmbeddingType,
     RecsysFeaturesBatch,
     from_record_batch,
+)
+from xrex.data.streaming.history_url_embedding import (
+    URL_EMBEDDING_DIM,
+    HistoryUrlEmbeddingLookup,
+    UrlEmbeddingLookupStats,
 )
 from xrex.data.streaming.kafkaconsumer import (
     DEFAULT_NEGATIVE_DOWNSAMPLE_POSITIVE_ACTION_INDICES,
@@ -156,6 +164,8 @@ _kafka_batch_processing_time = None
 _kafka_queue_size = None
 _kafka_empty_polls = None
 _kafka_partition_delivered_offset = None
+_kafka_history_url_embedding = None
+_kafka_history_url_embedding_mget_seconds = None
 
 _training_metrics_initialized = False
 _training_histograms: dict[str, Any] = {}
@@ -285,6 +295,7 @@ def _init_otel_metrics(
     global _kafka_embedding_zero_filled
     global _kafka_batch_processing_time, _kafka_queue_size, _kafka_empty_polls
     global _kafka_partition_delivered_offset
+    global _kafka_history_url_embedding, _kafka_history_url_embedding_mget_seconds
     global _training_metrics_initialized, _training_histograms, _training_metric_values
     global _training_cluster_name, _TRAINER_KEY_MAP, _KNOWN_OTEL_KEYS
     global metrics_server_started
@@ -518,6 +529,18 @@ def _init_otel_metrics(
         unit="1",
     )
 
+    _kafka_history_url_embedding = _meter.create_counter(
+        name="recsys_kafka_history_url_embedding_total",
+        description="History URL embedding lookup counts by outcome (UrlEmbeddingLookupStats)",
+        unit="1",
+    )
+
+    _kafka_history_url_embedding_mget_seconds = _meter.create_counter(
+        name="recsys_kafka_history_url_embedding_mget_seconds_total",
+        description="Time spent in history URL embedding Redis MGETs",
+        unit="1",
+    )
+
     _kafka_batch_processing_time = _meter.create_histogram(
         name="recsys_kafka_batch_processing_seconds",
         description="Time spent processing Kafka batches",
@@ -687,6 +710,17 @@ def report_training_metrics(
             hist.record(fval, attrs)
         else:
             _training_metric_values[(training_name, otel_key)] = fval
+
+
+def _record_history_url_embedding_stats(
+    stats: UrlEmbeddingLookupStats, attrs: Mapping[str, str]
+) -> None:
+    if _kafka_history_url_embedding is not None:
+        for outcome, count in dataclasses.asdict(stats).items():
+            if outcome != "mget_seconds" and count:
+                _kafka_history_url_embedding.add(count, {**attrs, "outcome": outcome})
+    if _kafka_history_url_embedding_mget_seconds is not None and stats.mget_seconds:
+        _kafka_history_url_embedding_mget_seconds.add(stats.mget_seconds, dict(attrs))
 
 
 def _cast_column(arr: pa.Array, target_type: pa.DataType) -> pa.Array:
@@ -1104,6 +1138,13 @@ class PhoenixKafkaDataset(PhoenixDataset):
     compute_post_unexplored_label: bool = False
     search_negative_clear_word_match: bool = False
 
+    history_url_embedding_cache: str = ""
+    history_url_embedding_dc: str = "atla"
+    history_url_embedding_cache_entries: int = 200_000
+    history_url_embedding_timeout_s: float = 0.1
+    history_url_embedding_sample_rate: float = 1.0
+    history_url_embedding_negative_ttl_s: float = 3600.0
+
     exclude_required_columns: str = ""
 
     def prepare_continuation(
@@ -1161,10 +1202,15 @@ class PhoenixKafkaDataset(PhoenixDataset):
             )
         if self.id_list_specs:
             optional_columns = [*optional_columns, id_list_features.COLUMN]
+        if self.read_ads_engagement_counts:
+            optional_columns = [*optional_columns, *ADS_COUNT_COLUMNS, *USER_ADS_COUNT_COLUMNS]
         embedding_col_name: str | None = None
         if self.multimodal_embedding_type is not None:
             embedding_col_name, _ = EMBEDDING_CONFIG[self.multimodal_embedding_type]
             optional_columns = [*optional_columns, embedding_col_name]
+        history_url_lookup = self._history_url_lookup
+        if history_url_lookup is not None:
+            optional_columns = [*optional_columns, HISTORY_URL_ID_COLUMN]
         unified_batches = _unify_record_batch_schemas(batch, required_columns, optional_columns)
 
         t = time.time()
@@ -1210,6 +1256,7 @@ class PhoenixKafkaDataset(PhoenixDataset):
             self.max_candidates_for_embeddings,
             self.multimodal_embedding_type,
             search_query_embedding_dim=self.search_query_embedding_dim,
+            aux_value_events=self.aux_value_events,
             candidate_negative_filter=self.candidate_negative_filter,
             candidate_negative_mode=(
                 self.candidate_negative_mode
@@ -1227,6 +1274,9 @@ class PhoenixKafkaDataset(PhoenixDataset):
             ads_pixel_head_masking=self.ads_pixel_head_masking,
             page_records=self.page_records,
             id_list_specs=self.id_list_specs or None,
+            history_url_embedding_dim=self.history_url_embedding_dim,
+            history_url_embedding_fn=history_url_lookup,
+            read_ads_engagement_counts=self.read_ads_engagement_counts,
             alloc=self._alloc,
         )
 
@@ -1264,8 +1314,37 @@ class PhoenixKafkaDataset(PhoenixDataset):
                 _kafka_messages_processed.add(len(batch), shard_attrs)
             if _kafka_embedding_zero_filled and embedding_col_name is not None:
                 _kafka_embedding_zero_filled.add(embedding_zero_filled, shard_attrs)
+            if history_url_lookup is not None:
+                _record_history_url_embedding_stats(history_url_lookup.take_stats(), shard_attrs)
 
         return example
+
+    @cached_property
+    def _history_url_lookup(self) -> HistoryUrlEmbeddingLookup | None:
+        if self.history_url_embedding_dim <= 0:
+            return None
+        if not self.history_url_embedding_cache:
+            rank_logger.warning(
+                "history_url_embedding_dim > 0 without history_url_embedding_cache: "
+                "history URL embeddings stay zero"
+            )
+            return None
+        if self.history_url_embedding_dim != URL_EMBEDDING_DIM:
+            raise ValueError(
+                f"history_url_embedding_dim={self.history_url_embedding_dim} must be "
+                f"{URL_EMBEDDING_DIM} to read the URL embedding cache"
+            )
+        return HistoryUrlEmbeddingLookup.from_cache(
+            self.history_url_embedding_cache,
+            self.history_url_embedding_dc,
+            self.history_url_embedding_timeout_s,
+            self.history_url_embedding_cache_entries,
+            self.history_url_embedding_sample_rate,
+            self.history_url_embedding_negative_ttl_s,
+        )
+
+    def exports_python_otel(self, shard_index: int, num_shards: int) -> bool:
+        return True
 
     def make(
         self,
@@ -1378,7 +1457,7 @@ class PhoenixKafkaDataset(PhoenixDataset):
         self._reset_event: Event = threading.Event()
         _kafka_reset_event = self._reset_event
 
-        if self.export_metrics:
+        if self.export_metrics and self.exports_python_otel(shard_index, num_shards):
             try:
                 _init_otel_metrics(
                     otel_endpoint=self.otel_endpoint,
@@ -1509,12 +1588,19 @@ class PhoenixKafkaDataset(PhoenixDataset):
                     offset < self.offset_ptr[partition] for partition, offset in offsets.items()
                 ):
                     raise ValueError("Kafka native batch offsets decreased")
+            report_metrics = self.export_metrics and _kafka_batches_processed
+            if report_metrics:
+                advanced = {
+                    _part: _off
+                    for _part, _off in offsets.items()
+                    if _part in self.offset_ptr and self.offset_ptr[_part] != _off
+                }
             self.offset_ptr.update(offsets)
             consecutive_empty_count = 0
 
-            if self.export_metrics and _kafka_batches_processed:
+            if report_metrics:
                 _kafka_batches_processed.add(1, shard_attrs)
-                for _part, _off in offsets.items():
+                for _part, _off in advanced.items():
                     _partition_delivered_offsets[
                         (self.name, self.topic_name, str(shard_index), _part)
                     ] = _off

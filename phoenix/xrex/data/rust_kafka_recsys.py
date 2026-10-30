@@ -7,6 +7,7 @@ import os
 import queue
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from itertools import zip_longest
 from typing import Iterator
 
@@ -38,6 +39,8 @@ class RustKafkaDataset(PhoenixKafkaDataset):
 
     queue_size: int = 1000
 
+    num_converter_threads: int = 1
+
     keep_per_factor: float = 1.0
 
     drop_catchup_window_secs: float = 7200.0
@@ -49,6 +52,8 @@ class RustKafkaDataset(PhoenixKafkaDataset):
     drop_min_keep_rate: float = 0.2
 
     drop_update_window_secs: float = 30.0
+
+    python_otel_on_last_shard_only: bool = False
 
     def _warn_ignored_inherited_fields(self) -> None:
         problems: list[tuple[str, object, str]] = []
@@ -118,6 +123,7 @@ class RustKafkaDataset(PhoenixKafkaDataset):
         provider = None
         control_watcher: threading.Thread | None = None
         reload_thread: threading.Thread | None = None
+        converters: ThreadPoolExecutor | None = None
         try:
             reader_count = self.redistribution_reader_count(num_shards)
             routed = bool(reader_count)
@@ -231,28 +237,89 @@ class RustKafkaDataset(PhoenixKafkaDataset):
             batches_since_log = 0
             last_offsets: dict[int, int] | None = None
 
+            def enqueue(payload) -> bool:
+                while True:
+                    if stop_event is not None and stop_event.is_set():
+                        return False
+                    try:
+                        example_queue.put(payload, timeout=1.0)
+                        return True
+                    except queue.Full:
+                        continue
+
+            forwarded = 0
+            forwarded_at_log = 0
+            forward_error: list[Exception] = []
+            in_flight: queue.Queue[tuple[Future[RecsysFeaturesBatch], dict[int, int]] | None]
+            if self.num_converter_threads > 1:
+                converters = ThreadPoolExecutor(
+                    max_workers=self.num_converter_threads, thread_name_prefix="kafka-convert"
+                )
+                in_flight = queue.Queue(maxsize=self.num_converter_threads)
+
+                def forward_results() -> None:
+                    nonlocal forwarded
+                    while True:
+                        try:
+                            item = in_flight.get(timeout=1.0)
+                        except queue.Empty:
+                            if stop_event is not None and stop_event.is_set():
+                                return
+                            continue
+                        if item is None:
+                            return
+                        future, batch_offsets = item
+                        try:
+                            payload = (future.result(), batch_offsets)
+                        except Exception as error:
+                            forward_error.append(error)
+                            enqueue(error)
+                            return
+                        if not enqueue(payload):
+                            return
+                        forwarded += 1
+
+                forwarder = threading.Thread(
+                    target=forward_results, name="kafka-forward", daemon=True
+                )
+                forwarder.start()
+
+            def hand_off(item) -> bool:
+                while True:
+                    if forward_error:
+                        raise forward_error[0]
+                    if stop_event is not None and stop_event.is_set():
+                        return False
+                    try:
+                        in_flight.put(item, timeout=1.0)
+                        return True
+                    except queue.Full:
+                        continue
+
             for record_batch, offsets in provider:
                 if stop_event is not None and stop_event.is_set():
                     break
                 if record_batch.num_rows == 0:
                     continue
 
-                example = self.kafka_to_training_batch([record_batch], batch_size, shard_index)
-
-                payload = (example, offsets)
-                while True:
-                    if stop_event is not None and stop_event.is_set():
+                if converters is None:
+                    example = self.kafka_to_training_batch([record_batch], batch_size, shard_index)
+                    if not enqueue((example, offsets)):
                         return
-                    try:
-                        example_queue.put(payload, timeout=1.0)
-                        break
-                    except queue.Full:
-                        continue
-                batches_since_log += 1
+                    batches_since_log += 1
+                else:
+                    future = converters.submit(
+                        self.kafka_to_training_batch, [record_batch], batch_size, shard_index
+                    )
+                    if not hand_off((future, offsets)):
+                        return
 
                 now = time.monotonic()
                 if now - last_qsize_log >= _QSIZE_LOG_INTERVAL_SECS:
                     elapsed = now - last_qsize_log
+                    if converters is not None:
+                        batches_since_log = forwarded - forwarded_at_log
+                        forwarded_at_log = forwarded
                     batches_per_s = batches_since_log / elapsed if elapsed > 0 else 0.0
                     rows_per_s = batches_per_s * batch_size
                     if in_rebaseline.is_set():
@@ -282,6 +349,12 @@ class RustKafkaDataset(PhoenixKafkaDataset):
                     if drop_status is not None:
                         line += f" | {drop_status}"
                     rank_logger.info("%s", line)
+            if converters is not None:
+                if not hand_off(None):
+                    return
+                forwarder.join()
+                if forward_error:
+                    raise forward_error[0]
             if reader_count and not (stop_event is not None and stop_event.is_set()):
                 raise RuntimeError("Redistributed Kafka reader ended unexpectedly")
         except Exception as error:
@@ -296,6 +369,8 @@ class RustKafkaDataset(PhoenixKafkaDataset):
                         continue
             raise
         finally:
+            if converters is not None:
+                converters.shutdown(wait=False, cancel_futures=True)
             if routed:
                 if stop_event is not None:
                     stop_event.set()
@@ -425,6 +500,9 @@ class RustKafkaDataset(PhoenixKafkaDataset):
         thread = threading.Thread(target=watcher, name="rust-kafka-control-watcher", daemon=True)
         thread.start()
         return thread
+
+    def exports_python_otel(self, shard_index: int, num_shards: int) -> bool:
+        return not self.python_otel_on_last_shard_only or shard_index == num_shards - 1
 
     def redistribution_reader_count(self, num_shards: int) -> int:
         if num_shards < 1 or (

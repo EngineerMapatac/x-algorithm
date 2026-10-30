@@ -1,14 +1,16 @@
 use crate::hydration::{Hydrator, Hydrators};
 use crate::models::{
-    tweet_timestamp_ms, ClientCapability, PostCandidate, PostEntity, UserEntity, ViewerFeatures,
+    tweet_timestamp_ms, ClientCapability, Placement, PostCandidate, PostEntity, Quote, UserEntity,
+    ViewerFeatures,
 };
 use crate::params::{CountryList, CountryLists};
-use crate::rules::rule_spec::features::Feature;
+use crate::rules::rule_spec::engine::Candidate;
+use crate::rules::rule_spec::features::Reads;
 
-pub(crate) struct RuleContext<'a> {
+pub(crate) struct RuleContext<'a, C = PostCandidate> {
     facts: CoreFacts<'a>,
     viewer: &'a ViewerFeatures,
-    candidate: &'a PostCandidate,
+    candidate: &'a C,
     #[cfg(test)]
     hydrated: Hydrators,
 }
@@ -18,16 +20,18 @@ pub(super) struct CoreFacts<'a> {
     viewer_id: Option<u64>,
     request_country: Option<&'a str>,
     client_capability: ClientCapability,
+    placement: Placement,
     country_lists: &'a CountryLists,
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct PostCoreFacts<'a>(&'a PostCandidate);
 
-impl<'a> RuleContext<'a> {
+impl<'a, C: Candidate> RuleContext<'a, C> {
     pub(super) fn new(
         viewer: &'a ViewerFeatures,
-        candidate: &'a PostCandidate,
+        candidate: &'a C,
+        placement: Placement,
         country_lists: &'a CountryLists,
     ) -> Self {
         Self {
@@ -35,6 +39,7 @@ impl<'a> RuleContext<'a> {
                 viewer_id: viewer.viewer.user_id(),
                 request_country: viewer.country_code.as_deref(),
                 client_capability: viewer.client_capability,
+                placement,
                 country_lists,
             },
             viewer,
@@ -70,12 +75,20 @@ impl<'a> RuleContext<'a> {
 
     #[inline]
     pub(super) fn failed(&self) -> Hydrators {
-        self.candidate.failed
+        self.candidate.failed()
     }
 
     #[inline]
-    pub(super) fn acquire<F: Feature>(&self) -> F::Value<'a> {
+    pub(super) fn acquire<F: Reads<C>>(&self) -> F::Value<'a> {
         F::read(At(self.reads(F::REQUIRED)))
+    }
+
+    #[inline]
+    pub(super) fn acquire_pair_edge(&self, node: Hydrator) -> bool {
+        self.reads(Hydrators::of(node))
+            .candidate
+            .quote()
+            .is_some_and(|quote| quote.pair_edges.contains(node))
     }
 
     #[inline]
@@ -84,8 +97,38 @@ impl<'a> RuleContext<'a> {
     }
 }
 
-#[derive(Clone, Copy)]
-pub(super) struct At<'c, 'a>(&'c RuleContext<'a>);
+pub(super) struct At<'c, 'a, C = PostCandidate>(&'c RuleContext<'a, C>);
+
+impl<C> Clone for At<'_, '_, C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<C> Copy for At<'_, '_, C> {}
+
+impl<'a, C: Candidate> At<'_, 'a, C> {
+    #[inline]
+    pub(super) fn author(self) -> &'a UserEntity {
+        self.0.candidate.author()
+    }
+
+    #[inline]
+    pub(super) fn viewer(self) -> &'a ViewerFeatures {
+        self.0.viewer
+    }
+
+    #[inline]
+    pub(super) fn quote(self) -> Option<Quote> {
+        self.0.candidate.quote()
+    }
+
+    #[inline]
+    pub(super) fn edge(self, node: Hydrator) -> bool {
+        debug_assert!(node.is_viewer_edge(), "{node:?} is not a viewer edge node");
+        self.0.candidate.edges().contains(node)
+    }
+}
 
 impl<'a> At<'_, 'a> {
     #[inline]
@@ -96,31 +139,6 @@ impl<'a> At<'_, 'a> {
     #[inline]
     pub(super) fn post_facts(self) -> PostCoreFacts<'a> {
         PostCoreFacts(self.0.candidate)
-    }
-
-    #[inline]
-    pub(super) fn author(self) -> &'a UserEntity {
-        &self.0.candidate.author
-    }
-
-    #[inline]
-    pub(super) fn viewer(self) -> &'a ViewerFeatures {
-        self.0.viewer
-    }
-
-    #[inline]
-    pub(super) fn edge(self, node: Hydrator) -> bool {
-        debug_assert!(node.is_edge(), "{node:?} is not an edge node");
-        let candidate = self.0.candidate;
-        debug_assert!(candidate
-            .post
-            .edges
-            .iter()
-            .all(|edge| candidate.viewer_relationship.get(edge).is_none()));
-        candidate
-            .viewer_relationship
-            .get(node)
-            .unwrap_or_else(|| candidate.post.edges.contains(node))
     }
 }
 
@@ -141,6 +159,11 @@ impl<'a> CoreFacts<'a> {
     }
 
     #[inline]
+    pub(super) fn placement(self) -> Placement {
+        self.placement
+    }
+
+    #[inline]
     pub(super) fn in_country_list(self, list: CountryList, country_code: &str) -> bool {
         self.country_lists.contains(list, country_code)
     }
@@ -150,16 +173,6 @@ impl PostCoreFacts<'_> {
     #[inline]
     pub(super) fn tweet_id(self) -> u64 {
         self.0.post.tweet_id
-    }
-
-    #[inline]
-    pub(super) fn author_id(self) -> u64 {
-        self.0.author.id
-    }
-
-    #[inline]
-    pub(super) fn is_reply(self) -> bool {
-        self.0.post.is_reply
     }
 
     #[inline]

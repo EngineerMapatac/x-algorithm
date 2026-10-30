@@ -33,6 +33,12 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub enable_profiling: bool,
 
+    #[arg(long)]
+    pub user_debias_artifact_path: Option<std::path::PathBuf>,
+
+    #[arg(long, default_value_t = 300)]
+    pub user_debias_reload_secs: u64,
+
     #[arg(long, default_value_t = false)]
     pub config_sync_enabled: bool,
 

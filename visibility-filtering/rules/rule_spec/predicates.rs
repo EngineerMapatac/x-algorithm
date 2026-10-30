@@ -1,63 +1,104 @@
 use super::features::Feature;
 use super::features::{
-    truth, ArticleStageLeaf, AuthorLabelsLeaf, AuthorSafetyLeaf, CommunityModeratorLeaf,
-    CommunityViewerRemovedLeaf, CompoundLeaf, EdgeLeaf, EvaluateFeature, Leaf, PostFactsLeaf,
-    PostModerationLeaf, ReplyControlLeaf, RequestLeaf, SourceTweetIdLeaf, Spelling, TweetLeaf,
-    TweetSafetyLabelsLeaf, ViewerAccountLeaf,
+    truth, ArticleStageLeaf, AuthorEmailLeaf, AuthorFactsLeaf, AuthorLabelsLeaf, AuthorPhoneLeaf,
+    AuthorProfileLeaf, AuthorSafetyLeaf, CommunityModeratorLeaf, CommunityViewerRemovedLeaf,
+    CompoundLeaf, EdgeLeaf, EvaluateFeature, Leaf, NotificationFilterLeaf, PairEdgeLeaf,
+    PostFactsLeaf, PostModerationLeaf, ReactedToAuthorSafetyLeaf, ReactedToPostSafetyLabelsLeaf,
+    Reads, RelationshipLeaf, ReplyControlLeaf, RequestLeaf, SourceTweetIdLeaf, Spelling, TweetLeaf,
+    TweetSafetyLabelsLeaf, ViewerAccountLeaf, ViewerLabelLeaf,
 };
 use super::*;
+use crate::rules::rule_spec::engine::{Engine, Fold, PostEngine};
 
 pub(in crate::rules) fn spelled_label(label: SafetyLabelType) -> String {
     label_meta(label).map_or_else(|| format!("{label:?}"), |meta| meta.ident.to_owned())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Predicate {
+pub enum Predicate<E: Engine = PostEngine> {
     Request(RequestLeaf),
-    PostFacts(PostFactsLeaf),
-    SourceTweetId(SourceTweetIdLeaf),
-    Tweet(TweetLeaf),
-    TweetSafetyLabels(TweetSafetyLabelsLeaf),
-    ReplyControl(ReplyControlLeaf),
-    PostModeration(PostModerationLeaf),
-    ArticleStage(ArticleStageLeaf),
-    CommunityModerator(CommunityModeratorLeaf),
-    CommunityViewerRemoved(CommunityViewerRemovedLeaf),
+    PostFacts(E::PostOnly<PostFactsLeaf>),
+    SourceTweetId(E::PostOnly<SourceTweetIdLeaf>),
+    Tweet(E::PostOnly<TweetLeaf>),
+    TweetSafetyLabels(E::PostOnly<TweetSafetyLabelsLeaf>),
+    ReplyControl(E::PostOnly<ReplyControlLeaf>),
+    PostModeration(E::PostOnly<PostModerationLeaf>),
+    ArticleStage(E::PostOnly<ArticleStageLeaf>),
+    CommunityModerator(E::PostOnly<CommunityModeratorLeaf>),
+    CommunityViewerRemoved(E::PostOnly<CommunityViewerRemovedLeaf>),
+    ReactedToPostSafetyLabels(E::PostOnly<ReactedToPostSafetyLabelsLeaf>),
+    ReactedToAuthorSafety(E::PostOnly<ReactedToAuthorSafetyLeaf>),
     ViewerAccount(ViewerAccountLeaf),
+    ViewerLabel(ViewerLabelLeaf),
+    NotificationFilter(NotificationFilterLeaf),
+    AuthorFacts(AuthorFactsLeaf),
     AuthorSafety(AuthorSafetyLeaf),
     AuthorLabels(AuthorLabelsLeaf),
-    Edge(EdgeLeaf),
-    Compound(CompoundLeaf),
+    AuthorProfile(AuthorProfileLeaf),
+    AuthorEmail(AuthorEmailLeaf),
+    AuthorPhone(AuthorPhoneLeaf),
+    Relationship(RelationshipLeaf),
+    PairEdge(PairEdgeLeaf),
+    Edge(E::PostOnly<EdgeLeaf>),
+    Compound(E::PostOnly<CompoundLeaf>),
 }
 
-trait PredicateVisitor {
+trait PredicateVisitor<E: Engine> {
     type Out;
-    fn leaf<L: Leaf>(self, leaf: L) -> Self::Out;
-    fn edge(self, leaf: EdgeLeaf) -> Self::Out;
-    fn compound(self, leaf: CompoundLeaf) -> Self::Out;
+    fn leaf<L: Leaf>(self, leaf: L) -> Self::Out
+    where
+        L::Feature: Reads<E::Candidate>;
+    fn post<L: Leaf>(self, leaf: E::PostOnly<L>) -> Self::Out;
+    fn relationship(self, leaf: RelationshipLeaf) -> Self::Out;
+    fn pair_edge(self, leaf: PairEdgeLeaf) -> Self::Out;
+    fn edge(self, leaf: E::PostOnly<EdgeLeaf>) -> Self::Out;
+    fn compound(self, leaf: E::PostOnly<CompoundLeaf>) -> Self::Out;
 }
 
-impl Predicate {
-    fn visit<V: PredicateVisitor>(self, visitor: V) -> V::Out {
+impl<E: Engine> Predicate<E> {
+    fn visit<V: PredicateVisitor<E>>(self, visitor: V) -> V::Out {
         match self {
             Self::Request(leaf) => visitor.leaf(leaf),
-            Self::PostFacts(leaf) => visitor.leaf(leaf),
-            Self::SourceTweetId(leaf) => visitor.leaf(leaf),
-            Self::Tweet(leaf) => visitor.leaf(leaf),
-            Self::TweetSafetyLabels(leaf) => visitor.leaf(leaf),
-            Self::ReplyControl(leaf) => visitor.leaf(leaf),
-            Self::PostModeration(leaf) => visitor.leaf(leaf),
-            Self::ArticleStage(leaf) => visitor.leaf(leaf),
-            Self::CommunityModerator(leaf) => visitor.leaf(leaf),
-            Self::CommunityViewerRemoved(leaf) => visitor.leaf(leaf),
+            Self::PostFacts(leaf) => visitor.post(leaf),
+            Self::SourceTweetId(leaf) => visitor.post(leaf),
+            Self::Tweet(leaf) => visitor.post(leaf),
+            Self::TweetSafetyLabels(leaf) => visitor.post(leaf),
+            Self::ReplyControl(leaf) => visitor.post(leaf),
+            Self::PostModeration(leaf) => visitor.post(leaf),
+            Self::ArticleStage(leaf) => visitor.post(leaf),
+            Self::CommunityModerator(leaf) => visitor.post(leaf),
+            Self::CommunityViewerRemoved(leaf) => visitor.post(leaf),
+            Self::ReactedToPostSafetyLabels(leaf) => visitor.post(leaf),
+            Self::ReactedToAuthorSafety(leaf) => visitor.post(leaf),
             Self::ViewerAccount(leaf) => visitor.leaf(leaf),
+            Self::ViewerLabel(leaf) => visitor.leaf(leaf),
+            Self::NotificationFilter(leaf) => visitor.leaf(leaf),
+            Self::AuthorFacts(leaf) => visitor.leaf(leaf),
             Self::AuthorSafety(leaf) => visitor.leaf(leaf),
             Self::AuthorLabels(leaf) => visitor.leaf(leaf),
+            Self::AuthorProfile(leaf) => visitor.leaf(leaf),
+            Self::AuthorEmail(leaf) => visitor.leaf(leaf),
+            Self::AuthorPhone(leaf) => visitor.leaf(leaf),
+            Self::Relationship(leaf) => visitor.relationship(leaf),
+            Self::PairEdge(leaf) => visitor.pair_edge(leaf),
             Self::Edge(leaf) => visitor.edge(leaf),
             Self::Compound(leaf) => visitor.compound(leaf),
         }
     }
 
+    pub(in crate::rules) fn requirements(self) -> Hydrators {
+        self.visit(Requirements)
+    }
+}
+
+pub(in crate::rules) fn truth_of<E: Fold>(
+    predicate: Predicate<E>,
+    context: &RuleContext<'_, E::Candidate>,
+) -> Truth {
+    predicate.visit(TruthOf(context))
+}
+
+impl Predicate {
     pub fn render(self, truth: Truth) -> String {
         self.visit(Sentence(truth))
             .unwrap_or_else(|| format!("{}: {truth:?}", self.spelled()))
@@ -67,23 +108,20 @@ impl Predicate {
         self.visit(Spelled)
     }
 
-    pub(in crate::rules) fn requirements(self) -> Hydrators {
-        self.visit(Requirements)
-    }
-
     #[cfg(test)]
     pub(super) fn holds(self, context: &RuleContext<'_>) -> bool {
         self.truth(context).resolves_true()
     }
 
+    #[cfg(test)]
     pub(in crate::rules) fn truth(self, context: &RuleContext<'_>) -> Truth {
-        self.visit(TruthOf(context))
+        truth_of(self, context)
     }
 }
 
 struct Spelled;
 
-impl PredicateVisitor for Spelled {
+impl PredicateVisitor<PostEngine> for Spelled {
     type Out = String;
 
     fn leaf<L: Leaf>(self, leaf: L) -> String {
@@ -92,6 +130,18 @@ impl PredicateVisitor for Spelled {
             Some(payload) => format!("{name}({payload})"),
             None => name.to_owned(),
         }
+    }
+
+    fn post<L: Leaf>(self, leaf: L) -> String {
+        self.leaf(leaf)
+    }
+
+    fn relationship(self, leaf: RelationshipLeaf) -> String {
+        <&str>::from(leaf).to_owned()
+    }
+
+    fn pair_edge(self, leaf: PairEdgeLeaf) -> String {
+        <&str>::from(leaf).to_owned()
     }
 
     fn edge(self, leaf: EdgeLeaf) -> String {
@@ -105,15 +155,27 @@ impl PredicateVisitor for Spelled {
 
 struct Sentence(Truth);
 
-impl PredicateVisitor for Sentence {
+impl PredicateVisitor<PostEngine> for Sentence {
     type Out = Option<String>;
 
     fn leaf<L: Leaf>(self, leaf: L) -> Option<String> {
         leaf.sentence(self.0)
     }
 
-    fn edge(self, leaf: EdgeLeaf) -> Option<String> {
+    fn post<L: Leaf>(self, leaf: L) -> Option<String> {
+        self.leaf(leaf)
+    }
+
+    fn relationship(self, leaf: RelationshipLeaf) -> Option<String> {
         leaf.sentence(self.0)
+    }
+
+    fn pair_edge(self, _: PairEdgeLeaf) -> Option<String> {
+        None
+    }
+
+    fn edge(self, _: EdgeLeaf) -> Option<String> {
+        None
     }
 
     fn compound(self, _: CompoundLeaf) -> Option<String> {
@@ -123,32 +185,55 @@ impl PredicateVisitor for Sentence {
 
 struct Requirements;
 
-impl PredicateVisitor for Requirements {
+impl<E: Engine> PredicateVisitor<E> for Requirements {
     type Out = Hydrators;
 
     fn leaf<L: Leaf>(self, _: L) -> Hydrators {
         <L::Feature as Feature>::REQUIRED
     }
 
-    fn edge(self, leaf: EdgeLeaf) -> Hydrators {
+    fn post<L: Leaf>(self, _: E::PostOnly<L>) -> Hydrators {
+        <L::Feature as Feature>::REQUIRED
+    }
+
+    fn relationship(self, leaf: RelationshipLeaf) -> Hydrators {
         Hydrators::of(leaf.node())
     }
 
-    fn compound(self, leaf: CompoundLeaf) -> Hydrators {
-        leaf.interpret(&inputs::Required)
+    fn pair_edge(self, leaf: PairEdgeLeaf) -> Hydrators {
+        Hydrators::of(leaf.node())
+    }
+
+    fn edge(self, leaf: E::PostOnly<EdgeLeaf>) -> Hydrators {
+        Hydrators::of(E::open(leaf).node())
+    }
+
+    fn compound(self, leaf: E::PostOnly<CompoundLeaf>) -> Hydrators {
+        E::open(leaf).interpret(&inputs::Required)
     }
 }
 
-struct TruthOf<'c, 'a>(&'c RuleContext<'a>);
+struct TruthOf<'c, 'a, E: Engine>(&'c RuleContext<'a, E::Candidate>);
 
-impl PredicateVisitor for TruthOf<'_, '_> {
+impl<E: Fold> PredicateVisitor<E> for TruthOf<'_, '_, E> {
     type Out = Truth;
 
-    fn leaf<L: Leaf>(self, leaf: L) -> Truth {
+    #[inline]
+    fn leaf<L: Leaf>(self, leaf: L) -> Truth
+    where
+        L::Feature: Reads<E::Candidate>,
+    {
         leaf.meaning(EvaluateFeature(self.0))
     }
 
-    fn edge(self, leaf: EdgeLeaf) -> Truth {
+    #[inline]
+    fn post<L: Leaf>(self, leaf: E::PostOnly<L>) -> Truth {
+        let (leaf, context) = E::post(self.0, leaf);
+        leaf.meaning(EvaluateFeature(context))
+    }
+
+    #[inline]
+    fn relationship(self, leaf: RelationshipLeaf) -> Truth {
         let node = leaf.node();
         truth(
             self.0.acquire_edge(node),
@@ -156,8 +241,29 @@ impl PredicateVisitor for TruthOf<'_, '_> {
         )
     }
 
-    fn compound(self, leaf: CompoundLeaf) -> Truth {
-        let inputs::Acquired { value, failed } = leaf.interpret(&inputs::EvaluateInputs(self.0));
+    #[inline]
+    fn pair_edge(self, leaf: PairEdgeLeaf) -> Truth {
+        let node = leaf.node();
+        truth(
+            self.0.acquire_pair_edge(node),
+            self.0.failed().intersection(Hydrators::of(node)),
+        )
+    }
+
+    #[inline]
+    fn edge(self, leaf: E::PostOnly<EdgeLeaf>) -> Truth {
+        let (leaf, context) = E::post(self.0, leaf);
+        let node = leaf.node();
+        truth(
+            context.acquire_edge(node),
+            context.failed().intersection(Hydrators::of(node)),
+        )
+    }
+
+    #[inline]
+    fn compound(self, leaf: E::PostOnly<CompoundLeaf>) -> Truth {
+        let (leaf, context) = E::post(self.0, leaf);
+        let inputs::Acquired { value, failed } = leaf.interpret(&inputs::EvaluateInputs(context));
         truth(value, failed)
     }
 }

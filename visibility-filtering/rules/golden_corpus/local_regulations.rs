@@ -1,8 +1,8 @@
-use super::builders::{nsfw_high_precision_media, on_client, viewer_in_country};
-use super::{Role, Row};
+use super::{Role, Row, Subject};
 use crate::models::TombstoneReason;
 use crate::rules::fixtures::{
-    author_viewer, blurred, sensitive_opt_in_viewer, tombstoned, viewer, VIEWER_ID,
+    author_viewer, blurred, nsfw_high_precision_media, on_client, sensitive_opt_in_viewer,
+    tombstoned, viewer, viewer_in_country, VIEWER_ID,
 };
 use crate::rules::SafetyLevel::{TimelineHome, TimelineHomeHydration};
 use xai_x_thrift::action::InterstitialReason;
@@ -26,7 +26,7 @@ pub(super) fn rows() -> Vec<Row> {
     };
     vec![Row {
         name: "nsfw_high_precision_media_in_a_local_regulations_country",
-        post: nsfw_high_precision_media(),
+        subject: Subject::Post(nsfw_high_precision_media()),
         expect: vec![
             (
                 TimelineHomeHydration,

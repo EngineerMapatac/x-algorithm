@@ -238,11 +238,6 @@ class MediaLoader:
                 grox_config.media_hydration.enable_light_dark_enhancement
                 and is_main_post
             )
-            should_enable_motion_reveal = (
-                grox_config.media_hydration.enable_motion_reveal
-                and is_main_post
-                and is_high_fav
-            )
             for medium in post.media:
                 if isinstance(medium, Image):
                     tasks.append(
@@ -260,7 +255,6 @@ class MediaLoader:
                             is_main_post,
                             is_high_fav,
                             should_enable_clahe_enhancement,
-                            should_enable_motion_reveal,
                         )
                     )
         if post.broadcast_metadata and post.broadcast_metadata.thumbnail_image:
@@ -394,7 +388,6 @@ class MediaLoader:
         is_main_post: bool = False,
         is_high_fav: bool = False,
         enable_clahe_enhancement: bool = False,
-        enable_motion_reveal: bool = False,
     ) -> None:
         url = None
         if video.videoInfo and video.videoInfo.durationMillis:
@@ -418,7 +411,8 @@ class MediaLoader:
                     video.videoInfo.get_highest_variant_within(
                         duration_ms, _VIDEO_MAX_ESTIMATED_BYTES
                     )
-                    if is_main_post and is_high_fav
+                    if (is_main_post and is_high_fav)
+                    or grox_config.media_hydration.highest_video_bitrate
                     else video.videoInfo.get_best_variant()
                 )
                 if best_variant and best_variant.url:
@@ -476,7 +470,7 @@ class MediaLoader:
                 is_main_post,
                 is_high_fav,
                 enable_clahe_enhancement,
-                enable_motion_reveal,
+                video.motion_reveal,
                 max_duration=video.crop_seconds,
                 key_frames_ranking=video.key_frames_ranking,
             )

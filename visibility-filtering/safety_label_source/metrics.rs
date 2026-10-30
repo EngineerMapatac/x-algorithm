@@ -1,9 +1,9 @@
-use xai_stats_receiver::{global_stats_receiver, HistogramBuckets};
+use std::sync::Arc;
 
-use super::types::{FailureKind, FallbackReason, LabelSource};
+use xai_stats_receiver::{HistogramBuckets, StatsReceiverExt};
 
-const LOOKUP_TWEET_IDS: &str = "safety_labels_lookup_tweet_ids";
-const FAILURES: &str = "safety_labels_lookup_failures";
+use super::remote::{FallbackReason, LabelSource};
+
 const SOURCE_REQUESTS: &str = "safety_labels_source_requests";
 const SOURCE_LATENCY_MS: &str = "safety_labels_source_latency_ms";
 const CACHE_KEYS: &str = "safety_labels_cache_keys";
@@ -11,6 +11,38 @@ const MANHATTAN_KEYS: &str = "safety_labels_manhattan_keys";
 const CACHE_FALLBACK_KEYS: &str = "safety_labels_cache_fallback_keys";
 const BATCH_SIZE: &str = "safety_labels_lookup_batch_size";
 const CACHE_WARM_KEYS: &str = "safety_labels_cache_warm_keys";
+const EXPIRED_LABELS: &str = "safety_labels_expired_labels";
+
+#[derive(Clone, Default)]
+pub(crate) struct LabelMetrics {
+    sink: Option<Arc<dyn StatsReceiverExt>>,
+}
+
+impl LabelMetrics {
+    pub(crate) fn new(sink: Option<Arc<dyn StatsReceiverExt>>) -> Self {
+        Self { sink }
+    }
+
+    fn incr(&self, metric: &str, labels: &[(&str, &str)], count: usize) {
+        if let Some(sink) = &self.sink
+            && count > 0
+        {
+            sink.incr(metric, labels, count as u64);
+        }
+    }
+
+    fn observe(&self, metric: &str, labels: &[(&str, &str)], value: f64) {
+        if let Some(sink) = &self.sink {
+            sink.observe(metric, labels, value, HistogramBuckets::Bucket50To500);
+        }
+    }
+
+    fn observe_vm(&self, metric: &str, labels: &[(&str, &str)], value: f64) {
+        if let Some(sink) = &self.sink {
+            sink.observe_vm(metric, labels, value);
+        }
+    }
+}
 
 #[derive(Clone, Copy, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
@@ -45,51 +77,43 @@ pub(crate) enum ManhattanResult {
 #[derive(Clone, Copy, strum::IntoStaticStr)]
 #[strum(serialize_all = "snake_case")]
 pub(crate) enum BatchStage {
-    Request,
     LocalMiss,
     ManhattanFallback,
 }
 
-pub(crate) fn record_lookup_tweet_ids(success: usize, failed: usize) {
-    incr_nonzero(LOOKUP_TWEET_IDS, &[("result", "success")], success as u64);
-    incr_nonzero(LOOKUP_TWEET_IDS, &[("result", "failed")], failed as u64);
+pub(crate) fn record_source_request(
+    metrics: &LabelMetrics,
+    source: LabelSource,
+    outcome: SourceOutcome,
+    elapsed_ms: f64,
+) {
+    let source = ("source", source.into());
+    metrics.incr(SOURCE_REQUESTS, &[source, ("outcome", outcome.into())], 1);
+    metrics.observe_vm(SOURCE_LATENCY_MS, &[source], elapsed_ms);
 }
 
-pub(crate) fn record_lookup_failures(kind: FailureKind, count: usize) {
-    incr_nonzero(FAILURES, &[("kind", kind.into())], count as u64);
+pub(crate) fn record_cache_keys(
+    metrics: &LabelMetrics,
+    tier: CacheTier,
+    result: CacheResult,
+    count: usize,
+) {
+    let labels = [("tier", tier.into()), ("result", result.into())];
+    metrics.incr(CACHE_KEYS, &labels, count);
 }
 
-pub(crate) fn record_source_request(source: LabelSource, outcome: SourceOutcome, elapsed_ms: f64) {
-    incr(
-        SOURCE_REQUESTS,
-        &[("source", source.into()), ("outcome", outcome.into())],
-        1,
-    );
-    observe_vm(SOURCE_LATENCY_MS, &[("source", source.into())], elapsed_ms);
-}
-
-pub(crate) fn record_cache_keys(tier: CacheTier, result: CacheResult, count: usize) {
-    incr_nonzero(
-        CACHE_KEYS,
-        &[("tier", tier.into()), ("result", result.into())],
-        count as u64,
-    );
-}
-
-pub(crate) fn record_manhattan_keys(result: ManhattanResult, count: usize) {
-    incr_nonzero(MANHATTAN_KEYS, &[("result", result.into())], count as u64);
+pub(crate) fn record_manhattan_keys(metrics: &LabelMetrics, result: ManhattanResult, count: usize) {
+    metrics.incr(MANHATTAN_KEYS, &[("result", result.into())], count);
 }
 
 pub(crate) fn record_cache_fallback_keys(
+    metrics: &LabelMetrics,
     source: LabelSource,
     reason: FallbackReason,
     count: usize,
 ) {
-    incr_nonzero(
-        CACHE_FALLBACK_KEYS,
-        &[("source", source.into()), ("reason", reason.into())],
-        count as u64,
-    );
+    let labels = [("source", source.into()), ("reason", reason.into())];
+    metrics.incr(CACHE_FALLBACK_KEYS, &labels, count);
 }
 
 #[derive(Clone, Copy, strum::IntoStaticStr)]
@@ -102,61 +126,33 @@ pub(crate) enum WarmKeyResult {
     FetchFailed,
 }
 
-pub(crate) fn record_cache_warm_keys(result: WarmKeyResult, count: usize) {
-    incr_nonzero(CACHE_WARM_KEYS, &[("result", result.into())], count as u64);
+pub(crate) fn record_cache_warm_keys(metrics: &LabelMetrics, result: WarmKeyResult, count: usize) {
+    metrics.incr(CACHE_WARM_KEYS, &[("result", result.into())], count);
 }
 
-pub(crate) fn record_batch_size(stage: BatchStage, size: usize) {
-    observe(
-        BATCH_SIZE,
-        &[("stage", stage.into())],
-        size as f64,
-        HistogramBuckets::Bucket50To500,
-    );
+pub(crate) fn record_expired_labels(metrics: &LabelMetrics, count: usize) {
+    metrics.incr(EXPIRED_LABELS, &[], count);
 }
 
-fn incr_nonzero(metric: &str, labels: &[(&str, &str)], count: u64) {
-    if count > 0 {
-        incr(metric, labels, count);
-    }
-}
-
-fn incr(metric: &str, labels: &[(&str, &str)], count: u64) {
-    if let Some(sr) = global_stats_receiver() {
-        sr.incr(metric, labels, count);
-    }
-}
-
-fn observe(metric: &str, labels: &[(&str, &str)], value: f64, buckets: HistogramBuckets) {
-    if let Some(sr) = global_stats_receiver() {
-        sr.observe(metric, labels, value, buckets);
-    }
-}
-
-fn observe_vm(metric: &str, labels: &[(&str, &str)], value: f64) {
-    if let Some(sr) = global_stats_receiver() {
-        sr.observe_vm(metric, labels, value);
-    }
+pub(crate) fn record_batch_size(metrics: &LabelMetrics, stage: BatchStage, size: usize) {
+    metrics.observe(BATCH_SIZE, &[("stage", stage.into())], size as f64);
 }
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
-    use std::path::Path;
-
     use xai_visibility_filtering::tweet_safety_label::{
         BATCH_LATENCY_VM_METRIC, LATENCY_VM_METRIC,
     };
+    use xai_visibility_filtering::vf_client::FILTER_TWEETS_LATENCY_VM_METRIC;
 
     #[test]
-    fn dashboard_generator_pins_the_get_safety_labels_vm_latency_metrics() {
-        let cargo = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/dashboard.py");
-        let ws = "crates/x-product/xai-visibility-filtering-service/scripts/dashboard.py";
-        let path = if Path::new(cargo).exists() { cargo } else { ws };
-        let dashboard = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    fn dashboard_generator_pins_the_client_vm_latency_metrics() {
+        let dashboard =
+            std::fs::read_to_string(crate::pinned::crate_path("scripts/dashboard.py")).unwrap();
         for pin in [
             format!("VF_CLIENT_LATENCY_VM_METRIC = \"{LATENCY_VM_METRIC}\""),
             format!("VF_CLIENT_BATCH_LATENCY_VM_METRIC = \"{BATCH_LATENCY_VM_METRIC}\""),
+            format!("VF_CLIENT_FT_LATENCY_VM_METRIC = \"{FILTER_TWEETS_LATENCY_VM_METRIC}\""),
         ] {
             assert!(dashboard.contains(&pin), "dashboard.py is missing `{pin}`");
         }

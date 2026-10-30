@@ -1,7 +1,6 @@
-use crate::clients::read_fields;
-use anyhow::bail;
+use crate::clients::strato::{self, decode_only};
+use crate::thrift_read::read_fields;
 use thrift::protocol::{TInputProtocol, TOutputProtocol, TSerializable, TType};
-use xai_strato::strato_thrift::{strato_decode, StratoResult};
 use xai_strato::StratoGrpc;
 
 const TFE_TOP_COUNTRY_COLUMN: &str = "about_this_account/tfe_top_country.User";
@@ -16,19 +15,9 @@ impl AboutThisAccountClient {
     }
 
     pub async fn tfe_top_country(&self, user_id: u64) -> anyhow::Result<Option<String>> {
-        let bytes = self
-            .grpc
-            .call(
-                TFE_TOP_COUNTRY_COLUMN,
-                "fetch",
-                vec![xai_strato::encode(&(user_id.cast_signed(), ()))],
-                None,
-            )
-            .await?;
-        match strato_decode::<UserTfeTopCountry>(&bytes)? {
-            StratoResult::Ok { value, .. } => Ok(value.and_then(|row| row.weighted_top_country)),
-            StratoResult::Err { code, message } => bail!("Strato error (code {code}): {message}"),
-        }
+        let key = xai_strato::encode(&(user_id.cast_signed(), ()));
+        let bytes = strato::fetch(&self.grpc, TFE_TOP_COUNTRY_COLUMN, key).await?;
+        Ok(strato::decode::<UserTfeTopCountry>(&bytes)?.and_then(|row| row.weighted_top_country))
     }
 }
 
@@ -62,17 +51,14 @@ impl TSerializable for UserTfeTopCountry {
     }
 
     fn write_to_out_protocol(&self, _o_prot: &mut dyn TOutputProtocol) -> thrift::Result<()> {
-        Err(thrift::new_protocol_error(
-            thrift::ProtocolErrorKind::NotImplemented,
-            "UserTfeTopCountry is decode-only",
-        ))
+        Err(decode_only("UserTfeTopCountry"))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clients::strato_answer::Thrift::{Bool, Str, Struct, I64};
+    use crate::clients::strato::answer::Thrift::{Bool, Str, Struct, I64};
     use thrift::protocol::TBinaryInputProtocol;
 
     fn decode_row(details: &[(i16, &str)]) -> UserTfeTopCountry {

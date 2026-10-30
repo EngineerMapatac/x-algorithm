@@ -40,6 +40,8 @@ pub fn is_web_conv_row(tweet_id: i64, has_conv_bit: bool) -> bool {
     tweet_id == WEB_CONV_FAKE_TWEET_ID || has_conv_bit
 }
 
+pub const WEB_CONV_URL_ID_COLUMN: &str = "webConvUrlId";
+
 pub fn conv_asset_map(ids: Option<&pb::ConvAssetIds>) -> HashMap<(i64, i64), i64> {
     ids.filter(|ids| {
         ids.asset_id.len() == ids.author_id.len()
@@ -171,6 +173,45 @@ pub const AUTHOR_IS_NSFW_CATEGORICAL_IDX: usize = AUTHOR_IS_NSFW_SEQ;
 pub const EXACT_PHRASE_CATEGORICAL_IDX: usize = EXACT_PHRASE_SEQ;
 
 const AUTHOR_NSFW_BIT: u64 = 2;
+
+pub mod ads_counts {
+    use xai_recsys_proto as pb;
+
+    pub const COUNTERS: [i32; 7] = [1, 2, 14, 3, 4, 5, 8];
+    pub const WINDOWS_SECS: [u32; 8] = [
+        3_600, 10_800, 43_200, 86_400, 259_200, 604_800, 1_209_600, 2_419_200,
+    ];
+    pub const PER_GROUP: usize = COUNTERS.len() * WINDOWS_SECS.len();
+    pub const NUM_FEATURES: usize = 3 * PER_GROUP;
+    pub const NUM_BUCKETS: usize = 33;
+
+    pub fn bucket(count: u32) -> u8 {
+        (u32::BITS - count.leading_zeros()) as u8
+    }
+
+    pub fn fill_group(counts: Option<&pb::EngagementCounts>, out: &mut [u8]) {
+        let Some(c) = counts.filter(|c| c.present) else {
+            return;
+        };
+        for (w, secs) in WINDOWS_SECS.iter().enumerate() {
+            let Some(col) = c.window_secs.iter().position(|s| s == secs) else {
+                continue;
+            };
+            for (f, counter) in COUNTERS.iter().enumerate() {
+                if !c.collected_actions.is_empty() && !c.collected_actions.contains(counter) {
+                    continue;
+                }
+                let count = c
+                    .rows
+                    .iter()
+                    .find(|r| r.action == *counter)
+                    .and_then(|r| r.counts.get(col).copied())
+                    .unwrap_or(0);
+                out[f * WINDOWS_SECS.len() + w] = bucket(count);
+            }
+        }
+    }
+}
 
 fn exact_phrase_categorical(lexical_match: Option<&pb::SearchLexicalMatch>) -> i32 {
     match lexical_match {
@@ -321,18 +362,31 @@ pub fn with_fixed_now_sec<R>(now: i32, f: impl FnOnce() -> R) -> R {
     f()
 }
 
-fn now_epoch_sec() -> i32 {
+fn fixed_now_sec() -> Option<i32> {
     if let Some(ts) = FIXED_NOW_SEC.with(std::cell::Cell::get) {
-        return ts;
+        return Some(ts);
     }
     static FIXED: std::sync::OnceLock<Option<i32>> = std::sync::OnceLock::new();
-    let fixed = FIXED.get_or_init(|| {
+    *FIXED.get_or_init(|| {
         std::env::var("RECSYS_FIXED_NOW_SEC")
             .ok()
             .and_then(|v| v.parse::<i32>().ok())
-    });
-    if let Some(ts) = fixed {
-        return *ts;
+    })
+}
+
+fn candidate_impression_sec(candidate_set: &pb::CandidateSet) -> i32 {
+    if let Some(ts) = fixed_now_sec() {
+        return ts;
+    }
+    match candidate_set.request_timestamp_ms {
+        Some(ms) if ms > 0 => (ms / 1000) as i32,
+        _ => now_epoch_sec(),
+    }
+}
+
+fn now_epoch_sec() -> i32 {
+    if let Some(ts) = fixed_now_sec() {
+        return ts;
     }
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -459,7 +513,9 @@ pub struct InputBuffer {
     pub candidate_conversion_dense_features: Vec<f32>,
     pub user_conversion_history_hashes: Vec<i32>,
     pub candidate_account_hashes: Vec<i32>,
+    pub candidate_ads_count_buckets: Vec<u8>,
     pub history_post_ids: Vec<i64>,
+    pub history_web_conv_url_ids: Vec<(u32, i64)>,
     pub history_semantic_ids: Vec<u16>,
     pub candidate_semantic_ids: Vec<u16>,
     pub num_history: usize,
@@ -486,6 +542,37 @@ impl InputBuffer {
             .take(cap)
             .take_while(|ch| ch.first().is_some_and(|&h| h != 0))
             .count()
+    }
+
+    pub fn stamp_ads_count_buckets(
+        &mut self,
+        model_config: &ModelConfig,
+        candidate_set: &pb::CandidateSet,
+        user_counts: Option<&pb::EngagementCounts>,
+    ) {
+        use ads_counts::{NUM_FEATURES, PER_GROUP, fill_group};
+        if !model_config.hash_table.ads_count_features {
+            return;
+        }
+        let mut user = [0u8; PER_GROUP];
+        fill_group(user_counts, &mut user);
+        let c = model_config.candidate_seq_len;
+        let mut out = vec![0u8; c * NUM_FEATURES];
+        for (row, candidate) in out
+            .chunks_exact_mut(NUM_FEATURES)
+            .zip(candidate_set.candidates.iter())
+        {
+            let ad = candidate.ad_info.as_ref();
+            let (ad_row, rest) = row.split_at_mut(PER_GROUP);
+            let (user_advertiser_row, user_row) = rest.split_at_mut(PER_GROUP);
+            fill_group(ad.and_then(|a| a.engagement_counts.as_ref()), ad_row);
+            fill_group(
+                ad.and_then(|a| a.viewer_advertiser_engagement_counts.as_ref()),
+                user_advertiser_row,
+            );
+            user_row.copy_from_slice(&user);
+        }
+        self.candidate_ads_count_buckets = out;
     }
 }
 
@@ -532,7 +619,7 @@ impl InputBuffer {
 
         let candidates_to_process = candidate_set.candidates.len().min(candidate_seq_len);
 
-        let now_sec = now_epoch_sec();
+        let now_sec = candidate_impression_sec(candidate_set);
 
         for (j, candidate) in candidate_set
             .candidates
@@ -1194,7 +1281,9 @@ impl InputBuffer {
             candidate_conversion_dense_features,
             user_conversion_history_hashes,
             candidate_account_hashes,
+            candidate_ads_count_buckets: Vec::new(),
             history_post_ids,
+            history_web_conv_url_ids: Vec::new(),
             history_semantic_ids,
             candidate_semantic_ids,
             num_history: valid_entry_count,
@@ -1359,7 +1448,9 @@ impl InputBuffer {
                     candidate_conversion_dense_features,
                     user_conversion_history_hashes,
                     candidate_account_hashes,
+                    candidate_ads_count_buckets: Vec::new(),
                     history_post_ids: vec![0i64; history_seq_len],
+                    history_web_conv_url_ids: Vec::new(),
                     history_semantic_ids: vec![0u16; history_seq_len * sid_num_levels],
                     candidate_semantic_ids,
                     num_history: 0,
@@ -1386,6 +1477,8 @@ impl InputBuffer {
         let col_repost_count = typed_column::<Int64Array>(&batch, REPOST_COUNT_SEQ_COLUMN);
         let col_quote_count = typed_column::<Int64Array>(&batch, QUOTE_COUNT_SEQ_COLUMN);
         let col_view_count = typed_column::<Int64Array>(&batch, VIEW_COUNT_SEQ_COLUMN);
+        let col_web_conv_url_id = typed_column::<Int64Array>(&batch, WEB_CONV_URL_ID_COLUMN);
+        let mut history_web_conv_url_ids = Vec::new();
         let col_web_conv_tracking_integration =
             typed_column::<Int32Array>(&batch, WEB_CONV_TRACKING_INTEGRATION_SEQ_COLUMN);
         let col_web_conv_time_on_site = [
@@ -1483,6 +1576,12 @@ impl InputBuffer {
                 && !code.is_null(row_idx)
             {
                 history_web_conv_tracking_integration[valid_entry_count] = code.value(row_idx);
+            }
+            if let Some(url_id) = col_web_conv_url_id
+                && !url_id.is_null(row_idx)
+                && url_id.value(row_idx) != 0
+            {
+                history_web_conv_url_ids.push((valid_entry_count as u32, url_id.value(row_idx)));
             }
 
             stamp_engagement_counts(
@@ -1645,7 +1744,9 @@ impl InputBuffer {
             candidate_conversion_dense_features,
             user_conversion_history_hashes,
             candidate_account_hashes,
+            candidate_ads_count_buckets: Vec::new(),
             history_post_ids,
+            history_web_conv_url_ids,
             history_semantic_ids,
             candidate_semantic_ids,
             num_history: valid_entry_count,
@@ -1785,6 +1886,25 @@ mod tests {
     };
     use crate::feature_config::int64_feature::{CLIENT_APP_ID_SEQ, CLIENT_APP_ID_SEQ_NAME};
 
+    #[test]
+    fn candidate_impression_time_uses_request_timestamp() {
+        let model_config = test_model_config(1);
+        let mut candidate_set = pb::CandidateSet::default();
+        candidate_set.candidates.push(pb::TweetInfo {
+            tweet_id: 1000,
+            author_id: 2000,
+            ..Default::default()
+        });
+        candidate_set.request_timestamp_ms = Some(1_760_000_123_999);
+        let cand = InputBuffer::new_with_candidates(&model_config, &candidate_set, None);
+        assert_eq!(cand.impr_ts[0], 1_760_000_123);
+
+        candidate_set.request_timestamp_ms = None;
+        let before = now_epoch_sec();
+        let cand = InputBuffer::new_with_candidates(&model_config, &candidate_set, None);
+        assert!((before..=now_epoch_sec()).contains(&cand.impr_ts[0]));
+    }
+
     fn test_model_config(num_post_categorical_features: usize) -> ModelConfig {
         ModelConfig {
             hash_table: crate::model_config::HashTableConfig {
@@ -1818,6 +1938,7 @@ mod tests {
                 num_post_int64_features: 0,
                 enable_stale_post: false,
                 enable_stale_post_30d: false,
+                ads_count_features: false,
             },
             history_seq_len: 4,
             candidate_seq_len: 3,
@@ -2428,6 +2549,68 @@ mod tests {
             );
             assert_eq!(0, history_cat(&buf, row));
         }
+    }
+
+    #[test]
+    fn columnar_history_web_conv_url_ids_follow_kept_positions() {
+        use arrow::array::Int64Array;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use arrow::ipc::writer::StreamWriter;
+        use arrow::record_batch::RecordBatch;
+        use std::sync::Arc;
+
+        let to_bytes = |batch: &RecordBatch| {
+            let mut bytes = Vec::new();
+            let mut writer = StreamWriter::try_new(&mut bytes, batch.schema().as_ref()).unwrap();
+            writer.write(batch).unwrap();
+            writer.finish().unwrap();
+            bytes
+        };
+        let ids = || -> Vec<Arc<dyn arrow::array::Array>> {
+            vec![
+                Arc::new(Int64Array::from(vec![11i64, 0, 13, 14])),
+                Arc::new(Int64Array::from(vec![21i64, 22, 23, 24])),
+            ]
+        };
+        let id_fields = || {
+            vec![
+                Field::new("tweetId", DataType::Int64, false),
+                Field::new("authorId", DataType::Int64, false),
+            ]
+        };
+        let mut fields = id_fields();
+        fields.push(Field::new(WEB_CONV_URL_ID_COLUMN, DataType::Int64, true));
+        let mut columns = ids();
+        columns.push(Arc::new(Int64Array::from(vec![
+            Some(-1_392_645_021_888_827_343i64),
+            Some(99),
+            None,
+            Some(7),
+        ])));
+        let with_column = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+        let without_column =
+            RecordBatch::try_new(Arc::new(Schema::new(id_fields())), ids()).unwrap();
+
+        let model_config = test_history_model_config();
+        let compute = |batch: &RecordBatch| {
+            InputBuffer::compute_from_columnar_bytes(
+                &model_config,
+                &to_bytes(batch),
+                &pb::CandidateSet::default(),
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let buf = compute(&with_column);
+        assert_eq!(buf.num_history, 3);
+        assert_eq!(
+            buf.history_web_conv_url_ids,
+            vec![(0, -1_392_645_021_888_827_343), (2, 7)]
+        );
+        assert!(compute(&without_column).history_web_conv_url_ids.is_empty());
     }
 
     #[test]

@@ -68,13 +68,14 @@ GROUP_IDS: dict[str, str] = {
     "home_direct_packed_gb300": "user_action_sequence_home_direct_packed",
     "home_direct_packed_nano": "user_action_sequence_home_direct_packed_nano",
     "immersive_page_rl": "user_action_sequence_immersive_page_rl",
+    "immersive_page_rl_cread": "user_action_sequence_immersive_page_rl_cread",
     "xrecsys_two_tower": "user_action_sequence_xrecsys_two_tower",
     "xrecsys_two_tower_combined": "user_action_sequence_xrecsys_two_tower_combined",
     "xrecsys_two_tower_combined_gb300": "user_action_sequence_xrecsys_two_tower_combined",
+    "xrecsys_two_tower_home_only": "user_action_sequence_xrecsys_two_tower_home_only",
     "xrecsys_two_tower_immersive_only": "user_action_sequence_xrecsys_two_tower_immersive_only",
     "xrecsys_two_tower_immersive_only_gb300": "user_action_sequence_xrecsys_two_tower_immersive_only",
     "xrecsys_two_tower_nano": "user_action_sequence_xrecsys_two_tower_nano",
-    "xrecsys_sid_gen_rec": "sid_gen_rec",
     "reply_two_tower_v2_main": "reply_two_tower_v2_main",
 }
 
@@ -145,6 +146,7 @@ def _ranking_aggregated_kafka(mparams, hash_table, use_post_sid, sid_num_levels,
         ads_head_masking=mparams.get("ads_head_masking", False),
         ads_pixel_head_masking=mparams.get("ads_pixel_head_masking", False),
         search_negative_clear_word_match=mparams.get("search_negative_clear_word_match", False),
+        read_ads_engagement_counts=mparams.get("read_ads_engagement_counts", False),
         page_records=_page_records(mparams),
     )
 
@@ -176,6 +178,7 @@ def _ranking_rust_kafka(mparams, hash_table, use_post_sid, sid_num_levels, confi
         ads_head_masking=mparams.get("ads_head_masking", False),
         ads_pixel_head_masking=mparams.get("ads_pixel_head_masking", False),
         max_redistribution_bytes=mparams.get("max_redistribution_bytes", 256 << 20),
+        read_ads_engagement_counts=mparams.get("read_ads_engagement_counts", False),
         page_records=_page_records(mparams),
     )
 
@@ -409,69 +412,8 @@ RETRIEVAL_EXTRA_DATASET_TYPES = [
 ]
 
 
-_SID_TOPIC = settings.SID_TOPIC
-_SID_KAFKA_CLUSTER = settings.SID_KAFKA_CLUSTER
-
-
-def _sid_aggregated_kafka(hash_table, dataset_params: dict, config_name: str):
-    return PhoenixKafkaDataset(
-        **kafka_kwargs(_SID_KAFKA_CLUSTER),
-        topic_name=_SID_TOPIC,
-        group_id=_group_id(config_name) + "-direct-numpy",
-        max_queue_size=100,
-        hash_table=hash_table,
-        path=None,
-        history_seq_len=dataset_params["history_seq_len"],
-        candidate_seq_len=dataset_params["candidate_seq_len"],
-        input_vocab_size=dataset_params["input_vocab_size"],
-        hash_vocab_size=dataset_params["hash_vocab_size"],
-        num_continuous_actions=dataset_params["num_continuous_actions"],
-        pad_token=dataset_params["pad_token"],
-        multimodal_embedding_type=None,
-        num_kafka_partitions=2048,
-        num_negatives_per_example=0,
-        include_candidate_post_ids=True,
-        use_post_sid=True,
-        sid_num_levels=dataset_params["sid_num_levels"],
-    )
-
-
-_GEN_RECS_TOPIC = settings.GEN_RECS_TOPIC
-_GEN_RECS_GLOBAL_IDS = Path(settings.GEN_RECS_GLOBAL_IDS)
-
-
-def _gen_recs_aggregated_kafka(mparams, hash_table, dataset_params: dict):
-    extra_kwargs: dict = {}
-    if dataset_params["num_global_negatives"] > 0:
-        extra_kwargs["global_ids_file_path"] = _GEN_RECS_GLOBAL_IDS
-    return PhoenixKafkaDataset(
-        **phoenix_kafka_kwargs(),
-        topic_name=_GEN_RECS_TOPIC,
-        group_id=f"{mparams['group_id']}_{job_suffix()}-direct-numpy",
-        max_queue_size=100,
-        hash_table=hash_table,
-        path=None,
-        history_seq_len=mparams["history_seq_len"],
-        candidate_seq_len=mparams["candidate_seq_len"],
-        input_vocab_size=mparams["input_vocab_size"],
-        num_continuous_actions=mparams["num_continuous_actions"],
-        pad_token=dataset_params["pad_token"],
-        multimodal_embedding_type="v5",
-        num_kafka_partitions=2048,
-        num_negatives_per_example=0,
-        include_candidate_post_ids=True,
-        num_global_negatives_per_example=dataset_params["num_global_negatives"],
-        candidate_negative_filter=dataset_params["candidate_negative_filter"],
-        candidate_negative_mode=dataset_params["candidate_negative_mode"],
-        global_ids_reload_interval_seconds=600,
-        **extra_kwargs,
-    )
-
-
 config_registry.RANKING_DATASET_FACTORIES.update(RANKING_DATASET_FACTORIES)
 config_registry.RANKING_EXTRA_DATASET_TYPES.extend(RANKING_EXTRA_DATASET_TYPES)
 config_registry.RETRIEVAL_DATASET_FACTORIES.update(RETRIEVAL_DATASET_FACTORIES)
 config_registry.RETRIEVAL_EXTRA_DATASET_TYPES.extend(RETRIEVAL_EXTRA_DATASET_TYPES)
 config_registry.GLOBAL_IDS_RESOLVERS.append(resolve_global_ids_file_path)
-config_registry.SID_DATASET_FACTORIES["aggregated_kafka"] = _sid_aggregated_kafka
-config_registry.GEN_RECS_DATASET_FACTORIES["aggregated_kafka"] = _gen_recs_aggregated_kafka

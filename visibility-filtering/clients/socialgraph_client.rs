@@ -30,10 +30,26 @@ pub enum EdgeDirection {
     Reverse,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EdgeFrom {
+    Viewer,
+    User(u64),
+}
+
+impl EdgeFrom {
+    pub fn id(self, viewer_id: Option<u64>) -> Option<u64> {
+        match self {
+            EdgeFrom::Viewer => viewer_id,
+            EdgeFrom::User(id) => Some(id),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EdgeQuery {
     pub graph: Graph,
     pub direction: EdgeDirection,
+    pub from: EdgeFrom,
     pub destination_ids: Vec<u64>,
 }
 
@@ -43,6 +59,7 @@ impl EdgeQuery {
         Self {
             graph,
             direction: EdgeDirection::Forward,
+            from: EdgeFrom::Viewer,
             destination_ids,
         }
     }
@@ -51,6 +68,7 @@ impl EdgeQuery {
         Self {
             graph,
             direction: EdgeDirection::Reverse,
+            from: EdgeFrom::Viewer,
             destination_ids,
         }
     }
@@ -60,7 +78,7 @@ impl EdgeQuery {
 pub trait SocialgraphClient: Send + Sync {
     async fn select_edges(
         &self,
-        viewer_id: u64,
+        viewer_id: Option<u64>,
         queries: &[EdgeQuery],
     ) -> Result<Vec<Option<HashSet<u64>>>, tonic::Status>;
 }
@@ -101,10 +119,17 @@ fn edge_membership_query(
     }
 }
 
-fn select_request(viewer_id: u64, queries: &[EdgeQuery]) -> (SelectRequest, Vec<usize>) {
+fn select_request(
+    viewer_id: Option<u64>,
+    queries: &[EdgeQuery],
+) -> Result<(SelectRequest, Vec<usize>), tonic::Status> {
     let mut flock_queries = Vec::new();
     let mut counts = Vec::with_capacity(queries.len());
     for query in queries {
+        let source_id = query
+            .from
+            .id(viewer_id)
+            .ok_or_else(|| tonic::Status::invalid_argument("an edge query names no source"))?;
         let ids = &query.destination_ids;
         let chunk_size = match query.direction {
             EdgeDirection::Forward => ids.len().max(1),
@@ -113,7 +138,7 @@ fn select_request(viewer_id: u64, queries: &[EdgeQuery]) -> (SelectRequest, Vec<
         let before = flock_queries.len();
         flock_queries
             .extend(ids.chunks(chunk_size).map(|chunk| {
-                edge_membership_query(viewer_id, query.graph, query.direction, chunk)
+                edge_membership_query(source_id, query.graph, query.direction, chunk)
             }));
         counts.push(flock_queries.len() - before);
     }
@@ -123,7 +148,7 @@ fn select_request(viewer_id: u64, queries: &[EdgeQuery]) -> (SelectRequest, Vec<
         service_account: None,
         quota_name: None,
     };
-    (request, counts)
+    Ok((request, counts))
 }
 
 fn decode_edge_sets(counts: &[usize], results: Vec<Results>) -> Vec<Option<HashSet<u64>>> {
@@ -186,10 +211,10 @@ impl ProdSocialgraphClient {
 impl SocialgraphClient for ProdSocialgraphClient {
     async fn select_edges(
         &self,
-        viewer_id: u64,
+        viewer_id: Option<u64>,
         queries: &[EdgeQuery],
     ) -> Result<Vec<Option<HashSet<u64>>>, tonic::Status> {
-        let (request, counts) = select_request(viewer_id, queries);
+        let (request, counts) = select_request(viewer_id, queries)?;
         let mut request = tonic::Request::new(request);
         if let Some(metadata) = &self.metadata {
             *request.metadata_mut() = metadata.clone();
@@ -235,14 +260,15 @@ mod tests {
     fn select_request_sends_forward_queries_whole_and_reverse_queries_in_chunks() {
         let reverse_ids: Vec<u64> = (1..=REVERSE_EDGE_CHUNK_SIZE as u64 + 1).collect();
         let (request, counts) = select_request(
-            999,
+            Some(999),
             &[
                 EdgeQuery::forward(Graph::Follows, reverse_ids.clone()),
                 EdgeQuery::forward(Graph::Mutes, vec![]),
                 EdgeQuery::reverse(Graph::Blocks, reverse_ids.clone()),
                 EdgeQuery::reverse(Graph::Follows, vec![]),
             ],
-        );
+        )
+        .unwrap();
         assert_eq!(counts, vec![1, 0, 2, 0]);
         let terms: Vec<(i32, bool, Vec<i64>)> = request
             .queries
@@ -265,6 +291,34 @@ mod tests {
                 (3, false, second.to_vec()),
             ]
         );
+    }
+
+    #[test]
+    fn a_sourced_query_sends_its_source_and_needs_no_viewer() {
+        let sourced = |source_id, graph, destination_ids| EdgeQuery {
+            from: EdgeFrom::User(source_id),
+            ..EdgeQuery::forward(graph, destination_ids)
+        };
+        let (request, _) = select_request(
+            None,
+            &[
+                sourced(20, Graph::Blocks, vec![30, 31]),
+                sourced(30, Graph::Follows, vec![20]),
+            ],
+        )
+        .unwrap();
+        let terms: Vec<(i64, i32, Vec<i64>)> = request
+            .queries
+            .iter()
+            .map(|query| {
+                let term = query.operations[0].term.as_ref().unwrap();
+                let ids = term.destination_ids.as_ref().unwrap().ids.clone();
+                (term.source_id, term.graph_id, ids)
+            })
+            .collect();
+        assert_eq!(terms, vec![(20, 3, vec![30, 31]), (30, 1, vec![20])]);
+        let unsourced = select_request(None, &[EdgeQuery::forward(Graph::Follows, vec![20])]);
+        assert_eq!(unsourced.unwrap_err().code(), tonic::Code::InvalidArgument);
     }
 
     #[test]

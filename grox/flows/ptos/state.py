@@ -12,6 +12,7 @@ class SafetyPolicyCategory(str, Enum):
     HateOrAbuse = "HateOrAbuse"
     ViolentSpeech = "ViolentSpeech"
     ChildSafety = "ChildSafety"
+    NonConsensualNudity = "NonConsensualNudity"
     IllegalAndRegulatedBehaviors = "IllegalAndRegulatedBehaviors"
     Spam = "Spam"
     SuicideOrSelfHarm = "SuicideOrSelfHarm"
@@ -20,6 +21,8 @@ class SafetyPolicyCategory(str, Enum):
     TerrorismOrViolentExtremism = "TerrorismOrViolentExtremism"
     CivicIntegrity = "CivicIntegrity"
     AgeGatingHarmfulText = "AgeGatingHarmfulText"
+    FraudAndFinancialCrime = "FraudAndFinancialCrime"
+    LocalLawSensitiveContent = "LocalLawSensitiveContent"
 
 
 class SafetyPolicyType(str, Enum):

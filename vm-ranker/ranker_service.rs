@@ -14,11 +14,13 @@ use crate::metrics::{
     SCORE_ERRORS, SCORE_REQUESTS,
 };
 use crate::ranking_config::RankingConfig;
-use crate::scoring::{DppContext, RankContext};
+use crate::scoring::{DebiasModels, DppContext, RankContext};
+use crate::user_debias_store::UserDebiasStore;
 
 pub struct VMRankerServiceImpl {
     request_semaphore: Arc<Semaphore>,
     dpp: Option<DppContext>,
+    user_debias: Option<Arc<UserDebiasStore>>,
     config: Option<Arc<RankingConfig>>,
 }
 
@@ -26,18 +28,21 @@ impl VMRankerServiceImpl {
     pub fn new(
         max_concurrent_requests: usize,
         dpp: Option<DppContext>,
+        user_debias: Option<Arc<UserDebiasStore>>,
         config: Option<Arc<RankingConfig>>,
     ) -> Self {
         let enabled = |on: bool| if on { "enabled" } else { "disabled" };
         info!(
-            "Initializing VMRankerService with max_concurrent_requests={}, dpp={}, ranking_config={}",
+            "Initializing VMRankerService with max_concurrent_requests={}, dpp={}, user_debias={}, ranking_config={}",
             max_concurrent_requests,
             enabled(dpp.is_some()),
+            enabled(user_debias.is_some()),
             enabled(config.is_some()),
         );
         Self {
             request_semaphore: Arc::new(Semaphore::new(max_concurrent_requests)),
             dpp,
+            user_debias,
             config,
         }
     }
@@ -96,6 +101,13 @@ impl VmRankerService for VMRankerServiceImpl {
             .observe(num_candidates as f64);
         let ctx = RankContext {
             dpp: self.dpp.clone(),
+            debias: DebiasModels {
+                user: self.user_debias.as_ref().and_then(|store| store.model()),
+                user_changed_at_ms: self
+                    .user_debias
+                    .as_ref()
+                    .map_or(0, |store| store.changed_at_ms()),
+            },
             config: self.config.clone(),
         };
         let result = crate::scoring::rank(req, ctx).await.map_err(|e| {

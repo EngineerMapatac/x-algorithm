@@ -6,6 +6,7 @@ import enum
 import logging
 import time
 import typing
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict, TypeVar
 
 import jax
@@ -14,7 +15,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from numpy import typing as npt
 
-from xrex.data.recsys import id_list_features, reply_features
+from xrex.data.recsys import history_id_lists, id_list_features, reply_features
 from xrex.data.recsys.ads_head_masking import build_trained_candidate_mask
 from xrex.data.recsys.ads_pixel_head_masking import build_head_eligible_mask
 from xrex.data.recsys.array_allocator import ArrayAllocator
@@ -24,8 +25,12 @@ from xrex.data.recsys.constants import (
     CONVERSION_KEEP_APP,
     CONVERSION_KEEP_WEB,
     action_type_map,
+    action_type_map_raw,
 )
 from xrex.data.recsys.feature_config import (
+    ADS_COUNT_BUCKETS,
+    ADS_COUNT_FAMILIES,
+    ADS_COUNT_WINDOWS,
     ADS_PRODUCT_KEY_HASH_BIAS,
     ADS_PRODUCT_KEY_HASH_BIAS_2,
     ADS_PRODUCT_KEY_HASH_MODULUS,
@@ -37,6 +42,7 @@ from xrex.data.recsys.feature_config import (
     CATEGORICAL_FEATURES,
     FLOAT_FEATURES,
     INT64_FEATURES,
+    NUM_ADS_COUNT_FEATURES,
     STALE_POST_14D_TTL_SEC,
     STALE_POST_30D_TTL_SEC,
     BoolFeature,
@@ -58,6 +64,36 @@ if TYPE_CHECKING:
 
 rank_logger = logging.getLogger("rank")
 rank_logger.setLevel(logging.INFO)
+
+DUMP_ALWAYS_KEEP_ACTION_INDICES: tuple[int, ...] = (
+    16,
+    17,
+    23,
+    25,
+    39,
+    89,
+)
+
+
+def dump_keep_sample_weights(
+    actions: npt.NDArray[np.bool_],
+    new_event_mask: npt.NDArray[np.bool_],
+    rate_per_10000: int,
+) -> npt.NDArray[np.float32]:
+    if rate_per_10000 <= 0:
+        raise ValueError(f"dump keep rate_per_10000 must be > 0, got {rate_per_10000}")
+    vocab = actions.shape[-1]
+    keep_idx = [i for i in DUMP_ALWAYS_KEEP_ACTION_INDICES if i < vocab]
+    cand = new_event_mask.astype(np.bool_, copy=False)
+    if keep_idx:
+        rare = (actions[:, :, keep_idx] & cand[:, :, None]).any(axis=(1, 2))
+    else:
+        rare = np.zeros(actions.shape[0], dtype=np.bool_)
+    no_cand = ~cand.any(axis=1)
+    inv_q = np.float32(10000.0 / rate_per_10000)
+    weights = np.where(rare | no_cand, np.float32(1.0), inv_q).astype(np.float32)
+    return weights.reshape(-1, 1)
+
 
 TWITTER_EPOCH_MS = 1288834974657
 
@@ -102,10 +138,21 @@ EMBEDDING_CONFIG = {
 
 EmbeddingType = Literal["v1", "v3", "v5", "v6", "v8"]
 
+HISTORY_URL_ID_COLUMN = "webConvUrlIdSeq"
+
+HistoryUrlEmbeddingFn = Callable[
+    [
+        npt.NDArray[np.int64],
+        npt.NDArray[np.bool_],
+        npt.NDArray[np.int64],
+        npt.NDArray[np.float16],
+    ],
+    None,
+]
+
 
 class CandidateNegativeFilter(enum.Enum):
     NONE = "none"
-    VQV_DWELL_10S = "vqv_dwell_10s"
 
 
 class CandidateNegativeMode(enum.Enum):
@@ -118,12 +165,7 @@ def _apply_candidate_negative_filter(
     actions: npt.NDArray[np.bool_],
     continuous_actions: npt.NDArray[np.float32],
 ) -> npt.NDArray[np.bool_]:
-    if filter_type == CandidateNegativeFilter.VQV_DWELL_10S:
-        vqv_idx = action_type_map["ClientTweetVideoQualityView"]
-        dwell_idx = 1
-        has_vqv = actions[:, vqv_idx]
-        dwell_secs = continuous_actions[:, dwell_idx]
-        return has_vqv & (dwell_secs >= 10.0)
+    del filter_type, continuous_actions
     return np.ones(actions.shape[0], dtype=np.bool_)
 
 
@@ -261,6 +303,23 @@ def _read_embedding_seq(
     return out
 
 
+def _nullable_i64_col(
+    rb: pa.RecordBatch, col: str, batch_size: int, alloc: ArrayAllocator
+) -> tuple[npt.NDArray[np.int64], npt.NDArray[np.bool_]]:
+    column = rb.column(col)
+    if not pa.types.is_fixed_size_list(column.type):
+        raise ValueError(f"{col} must be a FixedSizeList<int64>, got {column.type}")
+    values = _list_values(column)
+    valid = alloc.copy(
+        values.is_valid().to_numpy(zero_copy_only=False).reshape(batch_size, -1), np.bool_
+    )
+    valid &= column.is_valid().to_numpy(zero_copy_only=False)[:, None]
+    ids = alloc.copy(
+        values.fill_null(0).to_numpy(zero_copy_only=False).reshape(batch_size, -1), np.int64
+    )
+    return ids, valid
+
+
 class PostSeq(TypedDict):
     impr_ts: npt.NDArray[np.int32] | None
     actions: npt.NDArray[np.bool_] | None
@@ -278,8 +337,14 @@ class PostSeq(TypedDict):
     value_label_valid: NotRequired[npt.NDArray[np.bool_]]
     value_baseline_mean_usd: NotRequired[npt.NDArray[np.float32]]
     conversion_delay_ms: NotRequired[npt.NDArray[np.int32]]
+    aux_value_content_view_ratio: NotRequired[npt.NDArray[np.float32]]
+    aux_value_content_view_valid: NotRequired[npt.NDArray[np.bool_]]
+    aux_value_content_view_baseline_mean_usd: NotRequired[npt.NDArray[np.float32]]
+    aux_value_add_to_cart_ratio: NotRequired[npt.NDArray[np.float32]]
+    aux_value_add_to_cart_valid: NotRequired[npt.NDArray[np.bool_]]
+    aux_value_add_to_cart_baseline_mean_usd: NotRequired[npt.NDArray[np.float32]]
     safety_label_mask: npt.NDArray[np.int64] | None
-    embedding: npt.NDArray[np.float32] | jax.Array | None
+    embedding: npt.NDArray[np.float32] | npt.NDArray[np.float16] | jax.Array | None
     search_query_embeddings: npt.NDArray[np.float32] | None
     categorical_features: npt.NDArray[np.int16]
     int64_features: npt.NDArray[np.int64]
@@ -287,6 +352,7 @@ class PostSeq(TypedDict):
     bool_features: npt.NDArray[np.bool_]
     post_creation_ts_sec: npt.NDArray[np.int32]
     post_sids: npt.NDArray[np.uint16] | None
+    ads_count_buckets: NotRequired[npt.NDArray[np.uint8]]
     rl_served_slot: NotRequired[npt.NDArray[np.int32]]
     rl_weighted_score: NotRequired[npt.NDArray[np.float32]]
     rl_final_score: NotRequired[npt.NDArray[np.float32]]
@@ -409,32 +475,85 @@ LEXICAL_TEXT_COLUMN = "lexicalTextSeq"
 LEXICAL_QUERY_COLUMN = "lexicalQuerySeq"
 LEXICAL_AUTHOR_COLUMN = "lexicalAuthorSeq"
 
-VALUE_LABEL_DTYPES = {
-    "value_label_valid": np.bool_,
-    "value_baseline_mean_usd": np.float32,
-}
+AUX_VALUE_EVENTS: dict[str, str] = {"content_view": "ContentView", "add_to_cart": "AddToCart"}
+
+
+def aux_value_label_keys(event: str) -> tuple[str, str, str]:
+    if event not in AUX_VALUE_EVENTS:
+        raise ValueError(f"unknown auxiliary value event {event!r}; known: {[*AUX_VALUE_EVENTS]}")
+    return (
+        f"aux_value_{event}_ratio",
+        f"aux_value_{event}_valid",
+        f"aux_value_{event}_baseline_mean_usd",
+    )
+
+
+def _aux_value_label_columns(event: str) -> tuple[str, str, str]:
+    camel = AUX_VALUE_EVENTS[event]
+    return (
+        f"auxValue{camel}RatioSeq",
+        f"auxValue{camel}ValidSeq",
+        f"auxValue{camel}BaselineMeanUsdSeq",
+    )
+
+
+VALUE_LINE_ITEM_OPERAND = "line_item_id"
+VALUE_LINE_ITEM_KEY = "value_line_item_id"
+
+
+def value_label_columns(
+    aux_value_events: tuple[str, ...] = (),
+) -> tuple[tuple[str, str, type], ...]:
+    events = tuple(e for e in aux_value_events if e != VALUE_LINE_ITEM_OPERAND)
+    return (
+        ("value_label_valid", "valueLabelValidSeq", np.bool_),
+        ("value_baseline_mean_usd", "valueBaselineMeanUsdSeq", np.float32),
+        *(
+            (key, column, dtype)
+            for event in events
+            for key, column, dtype in zip(
+                aux_value_label_keys(event),
+                _aux_value_label_columns(event),
+                (np.float32, np.bool_, np.float32),
+                strict=True,
+            )
+        ),
+        *(
+            ((VALUE_LINE_ITEM_KEY, "lineItemIdSeq", np.int32),)
+            if VALUE_LINE_ITEM_OPERAND in aux_value_events
+            else ()
+        ),
+    )
+
+
+def value_label_dtypes(aux_value_events: tuple[str, ...] = ()) -> dict[str, type]:
+    return {key: dtype for key, _, dtype in value_label_columns(aux_value_events)}
+
+
+VALUE_LABEL_COLUMNS = value_label_columns((*AUX_VALUE_EVENTS, VALUE_LINE_ITEM_OPERAND))
+VALUE_LABEL_DTYPES = value_label_dtypes((*AUX_VALUE_EVENTS, VALUE_LINE_ITEM_OPERAND))
 
 
 def _read_value_labels(
-    record_batch: pa.RecordBatch, shape: tuple[int, int]
+    record_batch: pa.RecordBatch,
+    shape: tuple[int, int],
+    aux_value_events: tuple[str, ...] = (),
 ) -> dict[str, np.ndarray]:
-    labels: dict[str, np.ndarray] = {
-        key: np.zeros(shape, dtype=dtype) for key, dtype in VALUE_LABEL_DTYPES.items()
-    }
-    for key, column, arrow_type in (
-        ("value_label_valid", "valueLabelValidSeq", pa.bool_()),
-        ("value_baseline_mean_usd", "valueBaselineMeanUsdSeq", pa.float32()),
-    ):
+    columns = value_label_columns(aux_value_events)
+    labels: dict[str, np.ndarray] = {key: np.zeros(shape, dtype=dtype) for key, _, dtype in columns}
+    for key, column, dtype in columns:
         if column not in record_batch.schema.names:
             continue
+        is_bool = dtype is np.bool_
+        is_int = dtype is np.int32
+        arrow_type = pa.bool_() if is_bool else pa.int64() if is_int else pa.float32()
         col = record_batch.column(column)
         if col.type != pa.list_(arrow_type, shape[1]):
             raise ValueError(f"{column} must have type {pa.list_(arrow_type, shape[1])}")
         values = col.values.slice(col.offset * shape[1], shape[0] * shape[1])
-        values = values.fill_null(False if key == "value_label_valid" else 0.0)
-        labels[key] = (
-            values.to_numpy(zero_copy_only=False).reshape(shape).astype(VALUE_LABEL_DTYPES[key])
-        )
+        values = values.fill_null(False if is_bool else 0 if is_int else 0.0)
+        values = values.to_numpy(zero_copy_only=False).reshape(shape)
+        labels[key] = (values & 0x7FFFFFFF if is_int else values).astype(dtype)
         labels[key][col.is_null().to_numpy(zero_copy_only=False)] = 0
     return labels
 
@@ -462,6 +581,14 @@ def empty_conversion_delays(batch_size: int, candidate_seq_len: int) -> np.ndarr
         CONVERSION_DELAY_NONE,
         np.int32,
     )
+
+
+def empty_history_url_embedding(
+    batch_size: int, history_seq_len: int, history_url_embedding_dim: int
+) -> npt.NDArray[np.float16] | None:
+    if history_url_embedding_dim <= 0:
+        return None
+    return np.zeros((batch_size, history_seq_len, history_url_embedding_dim), np.float16)
 
 
 def _extend_conversion_delays(post_seq: PostSeq, shape: tuple[int, int]) -> np.ndarray:
@@ -492,9 +619,12 @@ def _read_string_slots(
 
 
 def _extend_value_labels(post_seq: PostSeq, shape: tuple[int, int]) -> dict[str, np.ndarray]:
-    labels = {key: np.zeros(shape, dtype=dtype) for key, dtype in VALUE_LABEL_DTYPES.items()}
-    for key in labels:
+    labels: dict[str, np.ndarray] = {}
+    for key, dtype in VALUE_LABEL_DTYPES.items():
         values = post_seq.get(key)
+        if values is None and key not in value_label_dtypes():
+            continue
+        labels[key] = np.zeros(shape, dtype=dtype)
         if isinstance(values, np.ndarray):
             labels[key][:, : values.shape[1]] = values
     return labels
@@ -546,6 +676,86 @@ def _stack_features(
             dest[dest_slice + (feat.value,)] = raw_cols[feat.name][user_idx, indices]
 
 
+def _history_arrays(
+    actions: np.ndarray,
+    author_ids: np.ndarray,
+    tweet_ids: np.ndarray,
+    promoted_ids: np.ndarray,
+    impressed_ms: np.ndarray,
+    served_ms: np.ndarray | None,
+    continuous_actions: np.ndarray,
+    padding_mask: np.ndarray,
+    new_event_mask: np.ndarray,
+) -> history_id_lists.HistoryArrays:
+    history_mask = padding_mask & ~new_event_mask
+    return history_id_lists.HistoryArrays(
+        actions=actions,
+        author_ids=author_ids,
+        tweet_ids=tweet_ids,
+        promoted_ids=promoted_ids,
+        impressed_ms=impressed_ms,
+        request_ms=history_id_lists.request_time_ms(
+            impressed_ms, served_ms, padding_mask & new_event_mask, history_mask
+        ),
+        history_mask=history_mask,
+        dwell_secs=continuous_actions[:, :, history_id_lists.DWELL_TIME_SLOT],
+    )
+
+
+_zeroed_history_ads_warned = False
+
+
+def _warn_once_on_zeroed_history_ads(arrays: history_id_lists.HistoryArrays) -> None:
+    global _zeroed_history_ads_warned
+    if _zeroed_history_ads_warned:
+        return
+    if history_id_lists.promoted_history_share(arrays) == 0.0:
+        _zeroed_history_ads_warned = True
+        rank_logger.warning(
+            "history id lists: no history event in this batch has a promoted id (records "
+            "written before the joiner kept the history ad flag, xai PR 1007310); promoted-only "
+            "lists read empty and organic lists include the ads on such records"
+        )
+
+
+ADS_COUNT_COLUMNS: tuple[str, ...] = tuple(
+    f"{level}{family}Count{window}Seq"
+    for level in ("ads", "userAdvertiser")
+    for family in ADS_COUNT_FAMILIES
+    for window in ADS_COUNT_WINDOWS
+)
+USER_ADS_COUNT_COLUMNS: tuple[str, ...] = tuple(
+    f"userAds{family}Count{window}" for family in ADS_COUNT_FAMILIES for window in ADS_COUNT_WINDOWS
+)
+assert len(ADS_COUNT_COLUMNS) + len(USER_ADS_COUNT_COLUMNS) == NUM_ADS_COUNT_FEATURES
+
+
+def ads_count_bucket(counts: npt.ArrayLike) -> npt.NDArray[np.uint8]:
+    x = np.asarray(counts, dtype=np.float64)
+    out = np.zeros(x.shape, dtype=np.uint8)
+    nz = x > 0
+    out[nz] = np.minimum(np.floor(np.log2(x[nz])) + 1, ADS_COUNT_BUCKETS - 1).astype(np.uint8)
+    return out
+
+
+def read_ads_count_buckets(
+    record_batch: pa.RecordBatch, batch_size: int, num_slots: int
+) -> npt.NDArray[np.uint8]:
+    out = np.zeros((batch_size, num_slots, NUM_ADS_COUNT_FEATURES), dtype=np.uint8)
+    names = set(record_batch.schema.names)
+    for j, col in enumerate(ADS_COUNT_COLUMNS):
+        if col in names:
+            values = _list_values(record_batch.column(col)).fill_null(0)
+            values = values.to_numpy(zero_copy_only=False).reshape(batch_size, -1)
+            width = min(values.shape[1], num_slots)
+            out[:, :width, j] = ads_count_bucket(values[:, :width])
+    for j, col in enumerate(USER_ADS_COUNT_COLUMNS):
+        if col in names:
+            values = record_batch.column(col).fill_null(0).to_numpy(zero_copy_only=False)
+            out[:, :, len(ADS_COUNT_COLUMNS) + j] = ads_count_bucket(values)[:, None]
+    return out
+
+
 def from_record_batch(
     record_batch: pa.RecordBatch,
     max_history_post_action_pairs: int,
@@ -576,9 +786,20 @@ def from_record_batch(
     ads_pixel_head_masking: bool = False,
     page_records: bool = False,
     id_list_specs: typing.Sequence[id_list_features.IdListFeatureSpec] | None = None,
+    history_url_embedding_dim: int = 0,
+    history_url_embedding_fn: HistoryUrlEmbeddingFn | None = None,
+    dump_keep_rate_per_10000: int | None = None,
+    read_ads_engagement_counts: bool = False,
     *,
     alloc: ArrayAllocator,
+    aux_value_events: tuple[str, ...] = (),
 ) -> RecsysFeaturesBatch:
+    if read_ads_engagement_counts and (
+        num_negatives_per_example or num_global_negatives_per_example
+    ):
+        raise ValueError(
+            "read_ads_engagement_counts aligns count slots with candidates; negatives are unsupported"
+        )
     start = time.time()
     batch_size = record_batch.num_rows
 
@@ -659,7 +880,9 @@ def from_record_batch(
             (batch_size, seq_len, num_continuous_actions), dtype=np.float32
         )
 
-    value_labels = _read_value_labels(record_batch, (batch_size, actions.shape[1]))
+    value_labels = _read_value_labels(
+        record_batch, (batch_size, actions.shape[1]), aux_value_events
+    )
     conversion_delays = _read_conversion_delays(record_batch, (batch_size, actions.shape[1]))
     lexical_strings = {
         column: slots
@@ -858,6 +1081,31 @@ def from_record_batch(
         id_list_ids, id_list_mask = id_list_features.parse_id_lists(
             id_list_col, id_list_specs, batch_size
         )
+        if any(s.is_history for s in id_list_specs):
+            served_ms = (
+                _col(record_batch, "servedTimeMsSeq", batch_size, np.int64, alloc=alloc)
+                if "servedTimeMsSeq" in record_batch.schema.names
+                else None
+            )
+            history_arrays = _history_arrays(
+                actions,
+                author_ids,
+                tweet_ids,
+                promoted_ids,
+                impression_timestamps_ms,
+                served_ms,
+                continuous_actions,
+                padding_mask,
+                new_event_mask,
+            )
+            _warn_once_on_zeroed_history_ads(history_arrays)
+            history_id_lists.fill(
+                id_list_ids,
+                id_list_mask,
+                id_list_specs,
+                history_arrays,
+                history_id_lists.ActionBits.for_vocab(action_type_map_raw, output_vocab_size),
+            )
         user_id_lists = (
             id_list_features.hash_id_lists(
                 id_list_ids, id_list_specs, hash_table.get_item_hash, hash_table.get_author_hash
@@ -913,7 +1161,8 @@ def from_record_batch(
         else {}
     )
     candidate_value_labels: dict[str, np.ndarray] = {
-        key: alloc.zeros(cand_shape_2d, dtype=dtype) for key, dtype in VALUE_LABEL_DTYPES.items()
+        key: alloc.zeros(cand_shape_2d, dtype=dtype)
+        for key, dtype in value_label_dtypes(aux_value_events).items()
     }
     candidate_conversion_delays = alloc.full(
         (*cand_shape_2d, len(CONVERSION_DELAY_COLUMNS)), CONVERSION_DELAY_NONE, dtype=np.int32
@@ -969,6 +1218,13 @@ def from_record_batch(
         else None
     )
 
+    url_columns: tuple[npt.NDArray[np.int64], npt.NDArray[np.bool_]] | None = None
+    history_url: tuple[npt.NDArray[np.int64], npt.NDArray[np.bool_]] | None = None
+    if history_url_embedding_fn is not None and history_url_embedding_dim > 0:
+        history_url = (alloc.zeros(hist_shape_2d, np.int64), alloc.zeros(hist_shape_2d, np.bool_))
+        if HISTORY_URL_ID_COLUMN in record_batch.schema.names:
+            url_columns = _nullable_i64_col(record_batch, HISTORY_URL_ID_COLUMN, batch_size, alloc)
+
     candidate_embedding: npt.NDArray[np.float32] | None = None
     if embedding_type is not None and embedding_dim > 0:
         candidate_embedding = alloc.zeros(
@@ -990,6 +1246,9 @@ def from_record_batch(
 
             history_post_ids[*hslice] = tweet_ids[*dslice]
             history_auth_ids[*hslice] = author_ids[*dslice]
+            if history_url is not None and url_columns is not None:
+                for dst, src in zip(history_url, url_columns, strict=True):
+                    dst[*hslice] = src[*dslice]
             if history_post_sids is not None and semantic_ids_full_raw is not None:
                 _src = semantic_ids_full_raw[*dslice]
                 _w = min(_src.shape[-1], history_post_sids.shape[-1])
@@ -1273,6 +1532,15 @@ def from_record_batch(
             user_int64=user_features["user_int64_features"],
         )
 
+    history_url_embedding: npt.NDArray[np.float16] | None = None
+    if history_url_embedding_dim > 0:
+        history_url_embedding = alloc.zeros((*hist_shape_2d, history_url_embedding_dim), np.float16)
+        if history_url_embedding_fn is not None and history_url is not None:
+            serve_time_ms = impression_timestamps_ms.max(
+                axis=1, initial=0, where=new_event_mask & padding_mask
+            )
+            history_url_embedding_fn(*history_url, serve_time_ms, history_url_embedding)
+
     history_seq = PostSeq(
         impr_ts=history_impr_ts,
         actions=history_actions,
@@ -1286,7 +1554,7 @@ def from_record_batch(
         promoted_ids=None,
         line_item_objective=None,
         safety_label_mask=history_safety_label_mask,
-        embedding=None,
+        embedding=history_url_embedding,
         search_query_embeddings=None,
         categorical_features=hist_categorical_features,
         bool_features=hist_bool_features,
@@ -1376,6 +1644,10 @@ def from_record_batch(
                 break
 
     rank_logger.debug(f"from_record_batch took: {time.time() - start}")
+    if read_ads_engagement_counts:
+        candidate_seq_with_negatives["ads_count_buckets"] = read_ads_count_buckets(
+            record_batch, batch_size, max_candidate_post_action_pairs
+        )
     batch = RecsysFeaturesBatch(
         user_hashes=hash_table.get_user_hash(user_ids),
         user_ip_hashes=hash_table.get_ip_hash(user_ip_ids),
@@ -1384,7 +1656,9 @@ def from_record_batch(
         **user_features,
         user_installed_apps_multihot=user_installed_apps_multihot,
         sample_weights=(
-            record_batch.column("sampleWeight")
+            dump_keep_sample_weights(actions, new_event_mask, dump_keep_rate_per_10000)
+            if dump_keep_rate_per_10000 is not None
+            else record_batch.column("sampleWeight")
             .to_numpy(zero_copy_only=False)
             .astype(np.float32)
             .reshape(-1, 1)

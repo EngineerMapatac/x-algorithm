@@ -38,7 +38,7 @@ async fn post_page_actions_never_waive_the_follower_ceiling() {
             "SpamEmbeddingPtosDistilled",
             "clf",
             &["anchor_campaign_post_label"],
-            Account::Followers200k,
+            Account::AboveTopLimit,
         );
         score.skip_author_credibility_prechecks = true;
         let trace = bed.run_fresh(&score).await;
@@ -66,7 +66,7 @@ async fn absent_action_control_config_keeps_page_live_records_recording_only() {
             None,
             None,
             ControlMode::Live,
-            vec![PageAction::Suspend {}],
+            vec![PageAction::SUSPEND],
         )],
     })
     .await;

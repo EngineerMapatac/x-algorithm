@@ -21,11 +21,19 @@ val underTheHoodReportMaxMonthBucket =
 val underTheHoodReportTakedownsEnabled =
   fs.booleanParam("under_the_hood_report_takedowns_enabled", false)
 
+val underTheHoodReportAppealsEnabled =
+  fs.booleanParam("under_the_hood_report_appeals_enabled", false)
+
+val sensitiveMediaAppealAuthorWarningEnabled =
+  fs.booleanParam("sensitive_media_appeal_author_warning_enabled", false)
+
 Library({
   export = {
     underTheHoodReportEnabled = underTheHoodReportEnabled,
     underTheHoodReportMaxMonthBucket = underTheHoodReportMaxMonthBucket,
     underTheHoodReportTakedownsEnabled = underTheHoodReportTakedownsEnabled,
+    underTheHoodReportAppealsEnabled = underTheHoodReportAppealsEnabled,
+    sensitiveMediaAppealAuthorWarningEnabled = sensitiveMediaAppealAuthorWarningEnabled,
   },
   description = PlainText("Feature switch params for Under the Hood"),
   contactInfo = <visibility/under-the-hood/sharedConfig>.contactInfo,

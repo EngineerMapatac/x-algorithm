@@ -1,11 +1,12 @@
+use crate::models::brand_safety::BrandSafetyVerdict;
 use crate::models::candidate::PostCandidate;
 use crate::models::query::ScoredPostsQuery;
 use crate::params::{
     EnableVideoCarouselAuthorDedupe, EnableVideoCarouselEmbeddingDedupe,
-    VideoCarouselEmbeddingDedupeThreshold, VideoCarouselImmersiveVqvWeight,
-    VideoCarouselSemanticIdDedupeLevels, VideoCarouselVideoOpenWeight, RESULT_SIZE,
+    EnableVideoCarouselHighRiskFilter, VideoCarouselEmbeddingDedupeThreshold,
+    VideoCarouselSemanticIdDedupeLevels, RESULT_SIZE,
 };
-use crate::util::video_carousel;
+use crate::util::video_carousel::{self, CarouselScoring};
 use xai_candidate_pipeline::filter::{Filter, FilterResult};
 
 pub struct VideoCarouselFilter;
@@ -23,10 +24,20 @@ impl Filter<ScoredPostsQuery, PostCandidate> for VideoCarouselFilter {
         let (removed, kept): (Vec<_>, Vec<_>) = candidates
             .into_iter()
             .partition(|candidate| candidate.video_carousel_extra);
+        let main_feed = &kept[..RESULT_SIZE.min(kept.len())];
+        let drop_high_risk = query.params.get(EnableVideoCarouselHighRiskFilter);
         let _ = query.video_carousel.set(video_carousel::select_videos(
-            kept.iter().skip(RESULT_SIZE).chain(&removed),
-            query.params.get(VideoCarouselVideoOpenWeight),
-            query.params.get(VideoCarouselImmersiveVqvWeight),
+            kept.iter()
+                .skip(RESULT_SIZE)
+                .chain(&removed)
+                .filter(|candidate| {
+                    !drop_high_risk
+                        || candidate
+                            .brand_safety_verdict
+                            .is_some_and(|verdict| verdict != BrandSafetyVerdict::HighRisk)
+                }),
+            main_feed,
+            &CarouselScoring::from_query(query),
             query.params.get(EnableVideoCarouselAuthorDedupe),
             query.params.get(VideoCarouselSemanticIdDedupeLevels) as usize,
             query
